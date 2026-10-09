@@ -1,0 +1,15 @@
+{
+  "name": "bazarish-auth",
+  "version": "0.1.0",
+  "description": "Sign-in with a Bazarish key: issue a challenge, verify the signed answer",
+  "license": "Unlicense",
+  "type": "module",
+  "exports": "./index.js",
+  "files": ["index.js"],
+  "engines": {
+    "node": ">=24.6.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

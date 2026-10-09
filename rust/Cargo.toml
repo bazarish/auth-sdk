@@ -1,0 +1,13 @@
+[package]
+name = "bazarish-auth"
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+description = "Sign-in with a Bazarish key: issue a challenge, verify the signed answer"
+repository = "https://github.com/bazarish/auth-sdk"
+
+[dependencies]
+base64 = "0.23"
+openssl = "0.10.81"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
