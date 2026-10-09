@@ -11,8 +11,15 @@ const PLACES_MAX = 4;
 const SIGNED_VERSION = 'v2';
 const LOGIN_METHOD = 'BZ-LOGIN';
 const LOGIN_PATH = '/portal/login';
-const CONTROL_CHARACTERS_BELOW = 0x20;
-const DELETE_CHARACTER = 0x7f;
+// SignInWithKey.md, "The consumer".
+const FORBIDDEN_CODE_POINTS = [
+  [0x0000, 0x001f],
+  [0x007f, 0x009f],
+  [0x061c, 0x061c],
+  [0x200e, 0x200f],
+  [0x2028, 0x202e],
+  [0x2066, 0x2069],
+];
 const MILLISECONDS_PER_SECOND = 1000;
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 const BASE32_BITS = 5;
@@ -141,10 +148,13 @@ function usable(consumer) {
 }
 
 function usableField(value, limit) {
-  if (typeof value !== 'string' || value === '' || Buffer.byteLength(value) > limit) {
+  if (typeof value !== 'string' || value === '' || !value.isWellFormed() || Buffer.byteLength(value) > limit) {
     return false;
   }
-  return ![...value].some((character) => character.charCodeAt(0) < CONTROL_CHARACTERS_BELOW || character.charCodeAt(0) === DELETE_CHARACTER);
+  return ![...value].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return FORBIDDEN_CODE_POINTS.some(([first, last]) => codePoint >= first && codePoint <= last);
+  });
 }
 
 function canonical(consumer) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -177,4 +178,30 @@ func TestConstructorRefusals(t *testing.T) {
 	expect(t, err, ErrInvalidConsumer)
 	_, err = NewVerifier(secret, newline, NewMemoryNonceStore())
 	expect(t, err, ErrInvalidConsumer)
+}
+
+func TestConsumerCodePoints(t *testing.T) {
+	v, secret := load(t)
+	named := func(character string) Consumer {
+		consumer := v.Consumer
+		consumer.Name = "panel" + character
+		return consumer
+	}
+	placed := v.Consumer
+	placed.Place = []string{v.Consumer.Place[0], "http://panel⁦.b32.i2p"}
+	_, err := NewVerifier(secret, placed, NewMemoryNonceStore())
+	expect(t, err, ErrInvalidConsumer)
+	refused := []string{"\u0085", "\u009f", "؜", "‎", " ", " ", "‪", "‮", "⁦", "⁩", "\xed\xa0\x80"}
+	for _, character := range refused {
+		t.Run(strconv.QuoteToASCII(character), func(t *testing.T) {
+			_, err := NewVerifier(secret, named(character), NewMemoryNonceStore())
+			expect(t, err, ErrInvalidConsumer)
+		})
+	}
+	allowed := []string{"‍", "‌", " ", "‧", " ", "⁥", "⁪"}
+	for _, character := range allowed {
+		t.Run(strconv.QuoteToASCII(character), func(t *testing.T) {
+			verifier(t, secret, named(character))
+		})
+	}
 }

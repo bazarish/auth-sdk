@@ -24,8 +24,15 @@ NAME_MAX = 96
 PLACE_MAX = 256
 ROLE_MAX = 48
 PLACES_MAX = 4
-CONTROL_CHARACTERS_BELOW = 0x20
-DELETE_CHARACTER = 0x7F
+# SignInWithKey.md, "The consumer".
+FORBIDDEN_CODE_POINTS = (
+    (0x0000, 0x001F),
+    (0x007F, 0x009F),
+    (0x061C, 0x061C),
+    (0x200E, 0x200F),
+    (0x2028, 0x202E),
+    (0x2066, 0x2069),
+)
 SIGNED_VERSION = "v2"
 LOGIN_METHOD = "BZ-LOGIN"
 LOGIN_PATH = "/portal/login"
@@ -157,10 +164,14 @@ def _consumer_of(envelope):
 
 
 def _usable_field(value, limit):
-    return (
-        isinstance(value, str)
-        and 0 < len(value.encode()) <= limit
-        and not any(ord(character) < CONTROL_CHARACTERS_BELOW or ord(character) == DELETE_CHARACTER for character in value)
+    if not isinstance(value, str):
+        return False
+    try:
+        encoded = value.encode()
+    except UnicodeEncodeError:
+        return False
+    return 0 < len(encoded) <= limit and not any(
+        first <= ord(character) <= last for character in value for first, last in FORBIDDEN_CODE_POINTS
     )
 
 

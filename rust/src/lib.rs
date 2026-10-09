@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::RangeInclusive;
 use std::sync::Mutex;
 
 use base64::Engine;
@@ -21,8 +22,15 @@ const NAME_MAX: usize = 96;
 const PLACE_MAX: usize = 256;
 const ROLE_MAX: usize = 48;
 const PLACES_MAX: usize = 4;
-const CONTROL_CHARACTERS_BELOW: u8 = 0x20;
-const DELETE_CHARACTER: u8 = 0x7f;
+// SignInWithKey.md, "The consumer".
+const FORBIDDEN_CODE_POINTS: &[RangeInclusive<char>] = &[
+    '\u{0000}'..='\u{001f}',
+    '\u{007f}'..='\u{009f}',
+    '\u{061c}'..='\u{061c}',
+    '\u{200e}'..='\u{200f}',
+    '\u{2028}'..='\u{202e}',
+    '\u{2066}'..='\u{2069}',
+];
 const SIGNED_VERSION: &str = "v2";
 const LOGIN_METHOD: &str = "BZ-LOGIN";
 const LOGIN_PATH: &str = "/portal/login";
@@ -265,9 +273,11 @@ fn signature_holds(key: &PKey<Public>, signed: &[u8], signature: &[u8]) -> Resul
 fn usable_field(value: &str, limit: usize) -> bool {
     !value.is_empty()
         && value.len() <= limit
-        && !value
-            .bytes()
-            .any(|byte| byte < CONTROL_CHARACTERS_BELOW || byte == DELETE_CHARACTER)
+        && !value.chars().any(|character| {
+            FORBIDDEN_CODE_POINTS
+                .iter()
+                .any(|forbidden| forbidden.contains(&character))
+        })
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(encoded: &str) -> Option<T> {

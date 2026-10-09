@@ -84,6 +84,20 @@ class VectorTest(unittest.TestCase):
                     Verifier(secret, consumer)
                 self.assertEqual(caught.exception.kind, kind)
 
+    def test_consumer_code_points(self):
+        refused = ["\u0085", "\u009f", "؜", "‎", " ", " ", "‪", "‮", "⁦", "⁩", "\ud800"]
+        allowed = ["‍", "‌", " ", "‧", " ", "⁥", "⁪"]
+        consumers = [Consumer(f"panel{character}", CONSUMER.place, CONSUMER.role) for character in refused]
+        consumers.append(Consumer(CONSUMER.name, [CONSUMER.place[0], "http://panel⁦.b32.i2p"], CONSUMER.role))
+        for consumer in consumers:
+            with self.subTest(ascii(consumer)):
+                with self.assertRaises(LoginError) as caught:
+                    Verifier(SECRET, consumer)
+                self.assertEqual(caught.exception.kind, "invalid_consumer")
+        for character in allowed:
+            with self.subTest(ascii(character)):
+                Verifier(SECRET, Consumer(f"panel{character}", CONSUMER.place, CONSUMER.role))
+
 
 if __name__ == "__main__":
     unittest.main()

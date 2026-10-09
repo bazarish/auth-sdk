@@ -215,3 +215,41 @@ fn constructor_refusals() {
         Err(Error::InvalidConsumer)
     ));
 }
+
+#[test]
+fn consumer_code_points() {
+    let (vector, secret) = load();
+    let named = |character: char| {
+        let mut consumer = vector.consumer.clone();
+        consumer.name = format!("panel{character}");
+        consumer
+    };
+    let mut placed = vector.consumer.clone();
+    placed.place[1] = "http://panel\u{2066}.b32.i2p".into();
+    assert!(matches!(
+        Verifier::new(&secret, &placed),
+        Err(Error::InvalidConsumer)
+    ));
+    let refused = [
+        '\u{85}', '\u{9f}', '\u{61c}', '\u{200e}', '\u{2028}', '\u{2029}', '\u{202a}', '\u{202e}',
+        '\u{2066}', '\u{2069}',
+    ];
+    for character in refused {
+        assert!(
+            matches!(
+                Verifier::new(&secret, &named(character)),
+                Err(Error::InvalidConsumer)
+            ),
+            "{character:?}"
+        );
+    }
+    let allowed = [
+        '\u{200d}', '\u{200c}', '\u{a0}', '\u{2027}', '\u{202f}', '\u{2065}', '\u{206a}',
+    ];
+    for character in allowed {
+        assert!(
+            Verifier::new(&secret, &named(character)).is_ok(),
+            "{character:?}"
+        );
+    }
+}

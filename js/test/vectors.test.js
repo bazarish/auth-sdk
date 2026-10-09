@@ -75,3 +75,17 @@ test('constructor refusals', () => {
     assert.throws(() => new Verifier(testSecret, testConsumer), (error) => error.kind === kind);
   }
 });
+
+test('consumer code points', () => {
+  const named = (character) => ({ ...consumer, name: `panel${character}` });
+  const refused = ['\u0085', '\u009f', '؜', '‎', ' ', ' ', '‪', '‮', '⁦', '⁩', '\ud800']
+    .map(named)
+    .concat({ ...consumer, place: [consumer.place[0], 'http://panel⁦.b32.i2p'] });
+  const allowed = ['‍', '‌', ' ', '‧', ' ', '⁥', '⁪'];
+  for (const [index, testConsumer] of refused.entries()) {
+    assert.throws(() => new Verifier(secret, testConsumer), (error) => error.kind === 'invalid_consumer', `refused ${index}`);
+  }
+  for (const [index, character] of allowed.entries()) {
+    assert.doesNotThrow(() => new Verifier(secret, named(character)), `allowed ${index}`);
+  }
+});

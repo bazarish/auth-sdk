@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -27,12 +28,20 @@ const (
 	placeMax         = 256
 	roleMax          = 48
 	placesMax        = 4
-	controlBelow     = 0x20
-	deleteCharacter  = 0x7f
 	signedVersion    = "v2"
 	loginMethod      = "BZ-LOGIN"
 	loginPath        = "/portal/login"
 )
+
+// SignInWithKey.md, "The consumer".
+var forbiddenCodePoints = []struct{ first, last rune }{
+	{0x0000, 0x001f},
+	{0x007f, 0x009f},
+	{0x061c, 0x061c},
+	{0x200e, 0x200f},
+	{0x2028, 0x202e},
+	{0x2066, 0x2069},
+}
 
 var (
 	ErrInvalidConsumer    = errors.New("bazarishauth: the consumer breaks the protocol's limits")
@@ -170,12 +179,14 @@ func (c Consumer) usable() bool {
 }
 
 func usableField(value string, limit int) bool {
-	if value == "" || len(value) > limit {
+	if value == "" || len(value) > limit || !utf8.ValidString(value) {
 		return false
 	}
-	for i := 0; i < len(value); i++ {
-		if value[i] < controlBelow || value[i] == deleteCharacter {
-			return false
+	for _, codePoint := range value {
+		for _, forbidden := range forbiddenCodePoints {
+			if codePoint >= forbidden.first && codePoint <= forbidden.last {
+				return false
+			}
 		}
 	}
 	return true
