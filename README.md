@@ -18,10 +18,17 @@ A site signs a user in with three calls:
 1. Create a verifier from a secret of at least 32 random bytes and the consumer.
    The consumer is the site's name, up to four addresses it answers at, and the
    role being signed into.
-2. Show the user the challenge that `issue` returns. The user signs it in their
-   Bazarish client and pastes the result back.
+2. Show the user the challenge that `issue` returns: a `bazarish://sign` link,
+   as text, a link or a QR code. The user signs it in their Bazarish client and
+   pastes the result back.
 3. Pass the challenge and the pasted text to `verify`. It returns the signer's
    fingerprint or an error that names the reason.
+
+A site reachable at a `.b32.i2p` address can let the client send the result
+itself: issue the challenge with a callback on that address (`IssueWithCallback`
+in Go, `issue_with_callback` in Rust, the second argument of `issue` in Python
+and JavaScript). The client posts `{"challenge": ..., "blob": ...}` as JSON to
+the callback, and the site verifies the pair as in step 3.
 
 ## Several processes
 
