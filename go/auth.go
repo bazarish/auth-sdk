@@ -31,6 +31,13 @@ const (
 	signedVersion    = "v2"
 	loginMethod      = "BZ-LOGIN"
 	loginPath        = "/portal/login"
+	challengePrefix  = "bazarish://sign?c="
+	callbackMax      = 256
+	callbackScheme   = "http://"
+	b32Suffix        = ".b32.i2p"
+	b32LabelChars    = 52
+	b33LabelChars    = 56
+	callbackMarks    = "-._~!$&'()*+,;=:@/?%"
 )
 
 // SignInWithKey.md, "The consumer".
@@ -45,6 +52,7 @@ var forbiddenCodePoints = []struct{ first, last rune }{
 
 var (
 	ErrInvalidConsumer    = errors.New("bazarishauth: the consumer breaks the protocol's limits")
+	ErrInvalidCallback    = errors.New("bazarishauth: the callback is not one of the consumer's I2P places")
 	ErrShortSecret        = errors.New("bazarishauth: the secret is shorter than 32 bytes")
 	ErrMalformedChallenge = errors.New("bazarishauth: this is not a login challenge")
 	ErrForeignConsumer    = errors.New("bazarishauth: the challenge names another consumer")
@@ -93,6 +101,7 @@ func (s *MemoryNonceStore) Consume(nonce string, now, until time.Time) (bool, er
 type Verifier struct {
 	secret    []byte
 	canonical string
+	places    []string
 	store     NonceStore
 }
 
@@ -106,20 +115,37 @@ func NewVerifier(secret []byte, consumer Consumer, store NonceStore) (*Verifier,
 	return &Verifier{
 		secret:    append([]byte(nil), secret...),
 		canonical: consumer.canonical(),
+		places:    append([]string(nil), consumer.Place...),
 		store:     store,
 	}, nil
 }
 
 func (v *Verifier) Issue(now time.Time) (string, error) {
+	return v.issue(now, "")
+}
+
+// IssueWithCallback names where the client may send the blob itself.
+func (v *Verifier) IssueWithCallback(now time.Time, callback string) (string, error) {
+	if !callbackUsable(callback, v.places) {
+		return "", ErrInvalidCallback
+	}
+	return v.issue(now, callback)
+}
+
+func (v *Verifier) issue(now time.Time, callback string) (string, error) {
 	raw := make([]byte, nonceBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	nonce := hex.EncodeToString(raw)
 	ts := now.Unix()
-	challenge := `{"consumer":` + v.canonical + `,"nonce":"` + nonce + `","tag":"` + v.tag(nonce, ts) +
+	head := `{`
+	if callback != "" {
+		head += `"callback":"` + callback + `",`
+	}
+	challenge := head + `"consumer":` + v.canonical + `,"nonce":"` + nonce + `","tag":"` + v.tag(nonce, ts) +
 		`","ts":` + strconv.FormatInt(ts, 10) + `,"v":` + strconv.Itoa(challengeVersion) + `}`
-	return base64.StdEncoding.EncodeToString([]byte(challenge)), nil
+	return challengePrefix + base64.RawURLEncoding.EncodeToString([]byte(challenge)), nil
 }
 
 func (v *Verifier) Verify(challenge, blob string, now time.Time) (string, error) {
@@ -130,7 +156,7 @@ func (v *Verifier) Verify(challenge, blob string, now time.Time) (string, error)
 		Consumer *Consumer `json:"consumer"`
 		Tag      string    `json:"tag"`
 	}
-	if decodeJSON(challenge, &envelope) != nil || envelope.V != challengeVersion ||
+	if decodeChallenge(challenge, &envelope) != nil || envelope.V != challengeVersion ||
 		envelope.Consumer == nil || !envelope.Consumer.usable() {
 		return "", ErrMalformedChallenge
 	}
@@ -257,6 +283,72 @@ func verifyBlob(blob, challenge string, now time.Time) (string, error) {
 
 func fresh(ts int64, now time.Time) bool {
 	return ts >= now.Unix()-windowSeconds && ts <= now.Unix()+windowSeconds
+}
+
+func callbackUsable(callback string, places []string) bool {
+	rest, found := strings.CutPrefix(callback, callbackScheme)
+	if !found || len(callback) > callbackMax {
+		return false
+	}
+	host, path, found := strings.Cut(rest, "/")
+	if !found || !isB32Host(host) {
+		return false
+	}
+	for _, c := range path {
+		if !(c < utf8.RuneSelf && (isAlnum(byte(c)) || strings.ContainsRune(callbackMarks, c))) {
+			return false
+		}
+	}
+	for _, place := range places {
+		if placeHost(place) == host {
+			return true
+		}
+	}
+	return false
+}
+
+func placeHost(place string) string {
+	rest, found := strings.CutPrefix(place, callbackScheme)
+	if !found && strings.Contains(place, "://") {
+		return ""
+	}
+	host, _, _ := strings.Cut(rest, "/")
+	return host
+}
+
+func isB32Host(host string) bool {
+	label, found := strings.CutSuffix(host, b32Suffix)
+	if !found || (len(label) != b32LabelChars && len(label) != b33LabelChars) {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		if !(c >= 'a' && c <= 'z') && !(c >= '2' && c <= '7') {
+			return false
+		}
+	}
+	return true
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func decodeChallenge(challenge string, target any) error {
+	encoded, found := strings.CutPrefix(challenge, challengePrefix)
+	if !found || encoded == "" {
+		return ErrMalformedChallenge
+	}
+	for i := 0; i < len(encoded); i++ {
+		if c := encoded[i]; !isAlnum(c) && c != '-' && c != '_' {
+			return ErrMalformedChallenge
+		}
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, target)
 }
 
 func decodeJSON(encoded string, target any) error {

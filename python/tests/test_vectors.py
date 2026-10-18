@@ -11,10 +11,26 @@ CONSUMER = Consumer(VECTOR["consumer"]["name"], VECTOR["consumer"]["place"], VEC
 NOW = VECTOR["now"]
 
 
+PREFIX = "bazarish://sign?c="
+
+
 def rewrite(encoded, edit):
-    fields = json.loads(base64.b64decode(encoded))
+    return base64.b64encode(rewrite_raw(base64.b64decode(encoded), edit)).decode()
+
+
+def unlinked(challenge):
+    encoded = challenge[len(PREFIX):]
+    return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+
+
+def rewrite_challenge(challenge, edit):
+    return PREFIX + base64.urlsafe_b64encode(rewrite_raw(unlinked(challenge), edit)).decode().rstrip("=")
+
+
+def rewrite_raw(raw, edit):
+    fields = json.loads(raw)
     edit(fields)
-    return base64.b64encode(json.dumps(fields).encode()).decode()
+    return json.dumps(fields).encode()
 
 
 def with_pq_key(key):
@@ -52,12 +68,14 @@ class VectorTest(unittest.TestCase):
             ("bad_signature", Verifier(SECRET, CONSUMER), challenge, renonced, NOW),
             ("bad_signature", Verifier(SECRET, CONSUMER), challenge, flipped("c"), NOW),
             ("bad_signature", Verifier(SECRET, CONSUMER), challenge, flipped("p"), NOW),
-            ("malformed_challenge", Verifier(SECRET, CONSUMER), rewrite(challenge, lambda f: f.update(v=CHALLENGE_VERSION + 1)), blob, NOW),
-            ("unknown_challenge", Verifier(SECRET, CONSUMER), rewrite(challenge, lambda f: f.update(tag="тег")), blob, NOW),
+            ("malformed_challenge", Verifier(SECRET, CONSUMER), rewrite_challenge(challenge, lambda f: f.update(v=CHALLENGE_VERSION + 1)), blob, NOW),
+            ("unknown_challenge", Verifier(SECRET, CONSUMER), rewrite_challenge(challenge, lambda f: f.update(tag="тег")), blob, NOW),
             ("wrong_key_type", Verifier(SECRET, CONSUMER), challenge, with_pq_key(lambda keys: keys["c"]), NOW),
             ("wrong_key_type", Verifier(SECRET, CONSUMER), challenge, with_pq_key(lambda keys: VECTOR["mldsa44PublicKey"]), NOW),
             ("malformed_blob", Verifier(SECRET, CONSUMER), challenge, challenge, NOW),
             ("malformed_challenge", Verifier(SECRET, CONSUMER), "%%%", blob, NOW),
+            ("malformed_challenge", Verifier(SECRET, CONSUMER), base64.b64encode(unlinked(challenge)).decode(), blob, NOW),
+            ("malformed_challenge", Verifier(SECRET, CONSUMER), challenge + "==", blob, NOW),
         ]
         for kind, verifier, case_challenge, case_blob, now in cases:
             with self.subTest(kind):
@@ -71,6 +89,29 @@ class VectorTest(unittest.TestCase):
     def test_issued_challenge_passes_up_to_the_blob(self):
         verifier = Verifier(SECRET, CONSUMER)
         self.refused("malformed_blob", verifier, verifier.issue(NOW), "")
+
+    def test_issue_with_callback(self):
+        verifier = Verifier(SECRET, CONSUMER)
+        host = CONSUMER.place[1][len("http://"):]
+        callback = f"http://{host}/login?step=2"
+        challenge = verifier.issue(NOW, callback)
+        self.assertEqual(json.loads(unlinked(challenge))["callback"], callback)
+        self.refused("malformed_blob", verifier, challenge, "")
+        elsewhere = "c" * 52 + ".b32.i2p"
+        for refused in [
+            f"http://{elsewhere}/login",
+            f"https://{host}/login",
+            f"http://{host}:8080/login",
+            f"http://{host}",
+            f"http://{host}/a b",
+            f"http://{host}/login#here",
+            f'http://{host}/say"hi"',
+            "http://panel.example/login",
+        ]:
+            with self.subTest(refused):
+                with self.assertRaises(LoginError) as caught:
+                    verifier.issue(NOW, refused)
+                self.assertEqual(caught.exception.kind, "invalid_callback")
 
     def test_constructor_refusals(self):
         cases = [

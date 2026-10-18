@@ -11,6 +11,12 @@ const PLACES_MAX = 4;
 const SIGNED_VERSION = 'v2';
 const LOGIN_METHOD = 'BZ-LOGIN';
 const LOGIN_PATH = '/portal/login';
+const CHALLENGE_PREFIX = 'bazarish://sign?c=';
+const CALLBACK_MAX = 256;
+const CALLBACK_SCHEME = 'http://';
+const B32_HOST = /^(?:[a-z2-7]{52}|[a-z2-7]{56})\.b32\.i2p$/;
+const CALLBACK_PATH = /^[A-Za-z0-9\-._~!$&'()*+,;=:@/?%]*$/;
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
 // SignInWithKey.md, "The consumer".
 const FORBIDDEN_CODE_POINTS = [
   [0x0000, 0x001f],
@@ -54,6 +60,7 @@ export class MemoryNonceStore {
 export class Verifier {
   #secret;
   #canonical;
+  #places;
   #store;
 
   constructor(secret, consumer, store = new MemoryNonceStore()) {
@@ -65,19 +72,25 @@ export class Verifier {
     }
     this.#secret = Buffer.from(secret);
     this.#canonical = canonical(consumer);
+    this.#places = [...consumer.place];
     this.#store = store;
   }
 
-  issue(now = currentSeconds()) {
+  // A callback names where the client may send the blob itself.
+  issue(now = currentSeconds(), callback = undefined) {
+    if (callback !== undefined && !callbackUsable(callback, this.#places)) {
+      throw new LoginError('invalid_callback', "the callback is not one of the consumer's I2P places");
+    }
     const ts = Math.floor(now);
     const nonce = randomBytes(NONCE_BYTES).toString('hex');
-    const challenge = `{"consumer":${this.#canonical},"nonce":"${nonce}","tag":"${this.#tag(nonce, ts)}",`
+    const head = callback === undefined ? '' : `"callback":"${callback}",`;
+    const challenge = `{${head}"consumer":${this.#canonical},"nonce":"${nonce}","tag":"${this.#tag(nonce, ts)}",`
       + `"ts":${ts},"v":${CHALLENGE_VERSION}}`;
-    return Buffer.from(challenge).toString('base64');
+    return CHALLENGE_PREFIX + Buffer.from(challenge).toString('base64url');
   }
 
   async verify(challenge, blob, now = currentSeconds()) {
-    const envelope = decode(challenge);
+    const envelope = decodeChallenge(challenge);
     if (envelope?.v !== CHALLENGE_VERSION || !usable(envelope.consumer)
         || !Number.isSafeInteger(envelope.ts) || typeof envelope.nonce !== 'string') {
       throw new LoginError('malformed_challenge', 'this is not a login challenge');
@@ -159,6 +172,45 @@ function usableField(value, limit) {
 
 function canonical(consumer) {
   return JSON.stringify({ name: consumer.name, place: consumer.place, role: consumer.role });
+}
+
+function callbackUsable(callback, places) {
+  if (typeof callback !== 'string' || callback.length > CALLBACK_MAX || !callback.startsWith(CALLBACK_SCHEME)) {
+    return false;
+  }
+  const rest = callback.slice(CALLBACK_SCHEME.length);
+  const slash = rest.indexOf('/');
+  if (slash < 0) {
+    return false;
+  }
+  const host = rest.slice(0, slash);
+  return B32_HOST.test(host) && CALLBACK_PATH.test(rest.slice(slash))
+    && places.some((place) => placeHost(place) === host);
+}
+
+function placeHost(place) {
+  let rest = place;
+  if (rest.startsWith(CALLBACK_SCHEME)) {
+    rest = rest.slice(CALLBACK_SCHEME.length);
+  } else if (rest.includes('://')) {
+    return undefined;
+  }
+  return rest.split('/')[0];
+}
+
+function decodeChallenge(challenge) {
+  if (typeof challenge !== 'string' || !challenge.startsWith(CHALLENGE_PREFIX)) {
+    return undefined;
+  }
+  const encoded = challenge.slice(CHALLENGE_PREFIX.length);
+  if (!BASE64URL.test(encoded)) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+  } catch {
+    return undefined;
+  }
 }
 
 function decode(encoded) {

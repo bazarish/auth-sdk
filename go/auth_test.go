@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,20 @@ func rewrite(t *testing.T, encoded string, edit func(map[string]any)) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return base64.StdEncoding.EncodeToString(rewriteRaw(t, raw, edit))
+}
+
+func rewriteChallenge(t *testing.T, challenge string, edit func(map[string]any)) string {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(challenge, challengePrefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return challengePrefix + base64.RawURLEncoding.EncodeToString(rewriteRaw(t, raw, edit))
+}
+
+func rewriteRaw(t *testing.T, raw []byte, edit func(map[string]any)) []byte {
+	t.Helper()
 	fields := map[string]any{}
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
@@ -62,7 +77,7 @@ func rewrite(t *testing.T, encoded string, edit func(map[string]any)) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return base64.StdEncoding.EncodeToString(out)
+	return out
 }
 
 func expect(t *testing.T, err, want error) {
@@ -110,8 +125,14 @@ func TestRefusals(t *testing.T) {
 			fields[field] = base64.StdEncoding.EncodeToString(signature)
 		})
 	}
-	nextVersion := rewrite(t, v.Challenge, func(fields map[string]any) { fields["v"] = challengeVersion + 1 })
-	nonAsciiTag := rewrite(t, v.Challenge, func(fields map[string]any) { fields["tag"] = "тег" })
+	nextVersion := rewriteChallenge(t, v.Challenge, func(fields map[string]any) { fields["v"] = challengeVersion + 1 })
+	nonAsciiTag := rewriteChallenge(t, v.Challenge, func(fields map[string]any) { fields["tag"] = "тег" })
+	envelope, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(v.Challenge, challengePrefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlinked := base64.StdEncoding.EncodeToString(envelope)
+	padded := v.Challenge + "=="
 
 	cases := []struct {
 		name      string
@@ -133,6 +154,8 @@ func TestRefusals(t *testing.T) {
 		{"ML-DSA-44 key in the pq slot", verifier(t, secret, v.Consumer), v.Challenge, weaker, now, ErrWrongKeyType},
 		{"challenge pasted as the blob", verifier(t, secret, v.Consumer), v.Challenge, v.Challenge, now, ErrMalformedBlob},
 		{"not base64", verifier(t, secret, v.Consumer), "%%%", v.Blob, now, ErrMalformedChallenge},
+		{"not a link", verifier(t, secret, v.Consumer), unlinked, v.Blob, now, ErrMalformedChallenge},
+		{"padded", verifier(t, secret, v.Consumer), padded, v.Blob, now, ErrMalformedChallenge},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -164,6 +187,40 @@ func TestIssuedChallengePassesUpToTheBlob(t *testing.T) {
 	}
 	_, err = subject.Verify(challenge, "", now)
 	expect(t, err, ErrMalformedBlob)
+}
+
+func TestIssueWithCallback(t *testing.T) {
+	v, secret := load(t)
+	subject := verifier(t, secret, v.Consumer)
+	now := time.Unix(v.Now, 0)
+	host := strings.TrimPrefix(v.Consumer.Place[1], callbackScheme)
+	challenge, err := subject.IssueWithCallback(now, callbackScheme+host+"/login?step=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Callback string `json:"callback"`
+	}
+	if err := decodeChallenge(challenge, &envelope); err != nil || envelope.Callback != callbackScheme+host+"/login?step=2" {
+		t.Fatalf("got %q, %v", envelope.Callback, err)
+	}
+	_, err = subject.Verify(challenge, "", now)
+	expect(t, err, ErrMalformedBlob)
+	elsewhere := strings.Repeat("c", b32LabelChars) + b32Suffix
+	refused := []string{
+		callbackScheme + elsewhere + "/login",
+		"https://" + host + "/login",
+		callbackScheme + host + ":8080/login",
+		callbackScheme + host,
+		callbackScheme + host + "/a b",
+		callbackScheme + host + "/login#here",
+		callbackScheme + host + `/say"hi"`,
+		"http://panel.example/login",
+	}
+	for _, callback := range refused {
+		_, err := subject.IssueWithCallback(now, callback)
+		expect(t, err, ErrInvalidCallback)
+	}
 }
 
 func TestConstructorRefusals(t *testing.T) {

@@ -36,6 +36,17 @@ FORBIDDEN_CODE_POINTS = (
 SIGNED_VERSION = "v2"
 LOGIN_METHOD = "BZ-LOGIN"
 LOGIN_PATH = "/portal/login"
+CHALLENGE_PREFIX = "bazarish://sign?c="
+CALLBACK_MAX = 256
+CALLBACK_SCHEME = "http://"
+B32_SUFFIX = ".b32.i2p"
+B32_LABEL_CHARS = 52
+B33_LABEL_CHARS = 56
+BASE32_LABEL_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz234567")
+CALLBACK_PATH_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&'()*+,;=:@/?%"
+)
+BASE64URL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 
 
 class LoginError(Exception):
@@ -85,9 +96,13 @@ class Verifier:
             raise LoginError("invalid_consumer", "the consumer breaks the protocol's limits")
         self._secret = bytes(secret)
         self._canonical = consumer._canonical()
+        self._places = list(consumer.place)
         self._store = store if store is not None else MemoryNonceStore()
 
-    def issue(self, now=None):
+    def issue(self, now=None, callback=None):
+        """A callback names where the client may send the blob itself."""
+        if callback is not None and not _callback_usable(callback, self._places):
+            raise LoginError("invalid_callback", "the callback is not one of the consumer's I2P places")
         now = int(time.time() if now is None else now)
         nonce = os.urandom(NONCE_BYTES).hex()
         challenge = {
@@ -97,11 +112,14 @@ class Verifier:
             "ts": now,
             "v": CHALLENGE_VERSION,
         }
-        return base64.b64encode(_compact(challenge).encode()).decode()
+        if callback is not None:
+            challenge["callback"] = callback
+        encoded = base64.urlsafe_b64encode(_compact(challenge).encode()).decode().rstrip("=")
+        return CHALLENGE_PREFIX + encoded
 
     def verify(self, challenge, blob, now=None):
         now = int(time.time() if now is None else now)
-        envelope = _decode(challenge)
+        envelope = _decode_challenge(challenge)
         consumer = _consumer_of(envelope)
         if consumer is None or not _is_int(envelope.get("ts")) or not isinstance(envelope.get("nonce"), str):
             raise LoginError("malformed_challenge", "this is not a login challenge")
@@ -173,6 +191,45 @@ def _usable_field(value, limit):
     return 0 < len(encoded) <= limit and not any(
         first <= ord(character) <= last for character in value for first, last in FORBIDDEN_CODE_POINTS
     )
+
+
+def _callback_usable(callback, places):
+    if not isinstance(callback, str) or len(callback) > CALLBACK_MAX or not callback.startswith(CALLBACK_SCHEME):
+        return False
+    host, slash, path = callback[len(CALLBACK_SCHEME):].partition("/")
+    return (
+        slash == "/"
+        and _is_b32_host(host)
+        and all(character in CALLBACK_PATH_CHARS for character in path)
+        and any(_place_host(place) == host for place in places)
+    )
+
+
+def _place_host(place):
+    if place.startswith(CALLBACK_SCHEME):
+        place = place[len(CALLBACK_SCHEME):]
+    elif "://" in place:
+        return None
+    return place.partition("/")[0]
+
+
+def _is_b32_host(host):
+    if not host.endswith(B32_SUFFIX):
+        return False
+    label = host[: -len(B32_SUFFIX)]
+    return len(label) in (B32_LABEL_CHARS, B33_LABEL_CHARS) and all(c in BASE32_LABEL_ALPHABET for c in label)
+
+
+def _decode_challenge(challenge):
+    if not isinstance(challenge, str) or not challenge.startswith(CHALLENGE_PREFIX):
+        return None
+    encoded = challenge[len(CHALLENGE_PREFIX):]
+    if not encoded or any(character not in BASE64URL_CHARS for character in encoded):
+        return None
+    try:
+        return json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    except (ValueError, TypeError, binascii.Error):
+        return None
 
 
 def _decode(encoded):

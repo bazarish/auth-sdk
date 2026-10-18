@@ -1,5 +1,5 @@
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bazarish_auth::{Consumer, Error, NONCE_BYTES, SECRET_MIN_BYTES, Verifier, WINDOW_SECONDS};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -31,11 +31,26 @@ fn load() -> (Vector, Vec<u8>) {
     (vector, secret)
 }
 
+const CHALLENGE_PREFIX: &str = "bazarish://sign?c=";
+
 fn rewrite(encoded: &str, edit: impl FnOnce(&mut Map<String, Value>)) -> String {
-    let mut fields: Map<String, Value> =
-        serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap();
+    STANDARD.encode(rewrite_raw(&STANDARD.decode(encoded).unwrap(), edit))
+}
+
+fn rewrite_challenge(challenge: &str, edit: impl FnOnce(&mut Map<String, Value>)) -> String {
+    let raw = URL_SAFE_NO_PAD
+        .decode(challenge.strip_prefix(CHALLENGE_PREFIX).unwrap())
+        .unwrap();
+    format!(
+        "{CHALLENGE_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(rewrite_raw(&raw, edit))
+    )
+}
+
+fn rewrite_raw(raw: &[u8], edit: impl FnOnce(&mut Map<String, Value>)) -> Vec<u8> {
+    let mut fields: Map<String, Value> = serde_json::from_slice(raw).unwrap();
     edit(&mut fields);
-    STANDARD.encode(serde_json::to_vec(&fields).unwrap())
+    serde_json::to_vec(&fields).unwrap()
 }
 
 #[test]
@@ -81,13 +96,19 @@ fn refusals() {
             fields.insert(field.into(), Value::from(STANDARD.encode(signature)));
         })
     };
-    let next_version = rewrite(challenge, |fields| {
+    let next_version = rewrite_challenge(challenge, |fields| {
         let version = fields["v"].as_i64().unwrap();
         fields.insert("v".into(), Value::from(version + 1));
     });
-    let non_ascii_tag = rewrite(challenge, |fields| {
+    let non_ascii_tag = rewrite_challenge(challenge, |fields| {
         fields.insert("tag".into(), Value::from("тег"));
     });
+    let unlinked = STANDARD.encode(
+        URL_SAFE_NO_PAD
+            .decode(challenge.strip_prefix(CHALLENGE_PREFIX).unwrap())
+            .unwrap(),
+    );
+    let padded = format!("{challenge}==");
     let fresh = || Verifier::new(&secret, &vector.consumer).unwrap();
 
     let cases = [
@@ -155,6 +176,16 @@ fn refusals() {
             fresh().verify("%%%", blob, now),
             Error::MalformedChallenge,
         ),
+        (
+            "not a link",
+            fresh().verify(&unlinked, blob, now),
+            Error::MalformedChallenge,
+        ),
+        (
+            "padded",
+            fresh().verify(&padded, blob, now),
+            Error::MalformedChallenge,
+        ),
     ];
     for (name, result, expected) in cases {
         match result {
@@ -193,6 +224,43 @@ fn issued_challenge_passes_up_to_the_blob() {
         verifier.verify(&challenge, "", vector.now),
         Err(Error::MalformedBlob)
     ));
+}
+
+#[test]
+fn issue_with_callback() {
+    let (vector, secret) = load();
+    let verifier = Verifier::new(&secret, &vector.consumer).unwrap();
+    let host = vector.consumer.place[1].strip_prefix("http://").unwrap();
+    let callback = format!("http://{host}/login?step=2");
+    let challenge = verifier.issue_with_callback(vector.now, &callback).unwrap();
+    let raw = URL_SAFE_NO_PAD
+        .decode(challenge.strip_prefix(CHALLENGE_PREFIX).unwrap())
+        .unwrap();
+    let fields: Map<String, Value> = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(fields["callback"], Value::from(callback));
+    assert!(matches!(
+        verifier.verify(&challenge, "", vector.now),
+        Err(Error::MalformedBlob)
+    ));
+    let elsewhere = format!("{}.b32.i2p", "c".repeat(52));
+    for refused in [
+        format!("http://{elsewhere}/login"),
+        format!("https://{host}/login"),
+        format!("http://{host}:8080/login"),
+        format!("http://{host}"),
+        format!("http://{host}/a b"),
+        format!("http://{host}/login#here"),
+        format!("http://{host}/say\"hi\""),
+        "http://panel.example/login".to_string(),
+    ] {
+        assert!(
+            matches!(
+                verifier.issue_with_callback(vector.now, &refused),
+                Err(Error::InvalidCallback)
+            ),
+            "{refused}"
+        );
+    }
 }
 
 #[test]

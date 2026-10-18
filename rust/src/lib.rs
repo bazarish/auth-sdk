@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 use std::sync::Mutex;
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
 use openssl::memcmp;
@@ -34,6 +34,13 @@ const FORBIDDEN_CODE_POINTS: &[RangeInclusive<char>] = &[
 const SIGNED_VERSION: &str = "v2";
 const LOGIN_METHOD: &str = "BZ-LOGIN";
 const LOGIN_PATH: &str = "/portal/login";
+const CHALLENGE_PREFIX: &str = "bazarish://sign?c=";
+const CALLBACK_MAX: usize = 256;
+const CALLBACK_SCHEME: &str = "http://";
+const B32_SUFFIX: &str = ".b32.i2p";
+const B32_LABEL_CHARS: usize = 52;
+const B33_LABEL_CHARS: usize = 56;
+const CALLBACK_MARKS: &str = "-._~!$&'()*+,;=:@/?%";
 const BASE32_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 const BASE32_BITS: u32 = 5;
 const BYTE_BITS: u32 = 8;
@@ -44,6 +51,7 @@ pub type StoreError = Box<dyn std::error::Error + Send + Sync>;
 pub enum Error {
     ShortSecret,
     InvalidConsumer,
+    InvalidCallback,
     MalformedChallenge,
     ForeignConsumer,
     Expired,
@@ -61,6 +69,9 @@ impl fmt::Display for Error {
         match self {
             Error::ShortSecret => f.write_str("the secret is shorter than 32 bytes"),
             Error::InvalidConsumer => f.write_str("the consumer breaks the protocol's limits"),
+            Error::InvalidCallback => {
+                f.write_str("the callback is not one of the consumer's I2P places")
+            }
             Error::MalformedChallenge => f.write_str("this is not a login challenge"),
             Error::ForeignConsumer => f.write_str("the challenge names another consumer"),
             Error::Expired => f.write_str("expired"),
@@ -134,6 +145,7 @@ impl NonceStore for MemoryNonceStore {
 pub struct Verifier<S: NonceStore = MemoryNonceStore> {
     secret: Vec<u8>,
     canonical: String,
+    places: Vec<String>,
     store: S,
 }
 
@@ -154,20 +166,39 @@ impl<S: NonceStore> Verifier<S> {
         Ok(Verifier {
             secret: secret.to_vec(),
             canonical: consumer.canonical(),
+            places: consumer.place.clone(),
             store,
         })
     }
 
     pub fn issue(&self, now: i64) -> Result<String, Error> {
+        self.issue_to(now, None)
+    }
+
+    /// Names where the client may send the blob itself.
+    pub fn issue_with_callback(&self, now: i64, callback: &str) -> Result<String, Error> {
+        if !callback_usable(callback, &self.places) {
+            return Err(Error::InvalidCallback);
+        }
+        self.issue_to(now, Some(callback))
+    }
+
+    fn issue_to(&self, now: i64, callback: Option<&str>) -> Result<String, Error> {
         let mut raw = [0u8; NONCE_BYTES];
         rand_bytes(&mut raw)?;
         let nonce = hex(&raw);
+        let head = callback.map_or(String::new(), |callback| {
+            format!(r#""callback":"{callback}","#)
+        });
         let challenge = format!(
-            r#"{{"consumer":{},"nonce":"{nonce}","tag":"{}","ts":{now},"v":{CHALLENGE_VERSION}}}"#,
+            r#"{{{head}"consumer":{},"nonce":"{nonce}","tag":"{}","ts":{now},"v":{CHALLENGE_VERSION}}}"#,
             self.canonical,
             self.tag(&nonce, now)?
         );
-        Ok(STANDARD.encode(challenge))
+        Ok(format!(
+            "{CHALLENGE_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(challenge)
+        ))
     }
 
     pub fn verify(&self, challenge: &str, blob: &str, now: i64) -> Result<String, Error> {
@@ -179,7 +210,7 @@ impl<S: NonceStore> Verifier<S> {
             consumer: Consumer,
             tag: String,
         }
-        let envelope: Envelope = decode(challenge).ok_or(Error::MalformedChallenge)?;
+        let envelope: Envelope = decode_challenge(challenge).ok_or(Error::MalformedChallenge)?;
         if envelope.v != CHALLENGE_VERSION || !envelope.consumer.usable() {
             return Err(Error::MalformedChallenge);
         }
@@ -278,6 +309,50 @@ fn usable_field(value: &str, limit: usize) -> bool {
                 .iter()
                 .any(|forbidden| forbidden.contains(&character))
         })
+}
+
+fn callback_usable(callback: &str, places: &[String]) -> bool {
+    let Some(rest) = callback.strip_prefix(CALLBACK_SCHEME) else {
+        return false;
+    };
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    callback.len() <= CALLBACK_MAX
+        && is_b32_host(host)
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || CALLBACK_MARKS.contains(c))
+        && places.iter().any(|place| place_host(place) == Some(host))
+}
+
+fn place_host(place: &str) -> Option<&str> {
+    let rest = match place.strip_prefix(CALLBACK_SCHEME) {
+        Some(rest) => rest,
+        None if place.contains("://") => return None,
+        None => place,
+    };
+    Some(rest.split('/').next().unwrap_or(rest))
+}
+
+fn is_b32_host(host: &str) -> bool {
+    host.strip_suffix(B32_SUFFIX).is_some_and(|label| {
+        (label.len() == B32_LABEL_CHARS || label.len() == B33_LABEL_CHARS)
+            && label.bytes().all(|c| BASE32_ALPHABET.contains(&c))
+    })
+}
+
+fn decode_challenge<T: for<'de> Deserialize<'de>>(challenge: &str) -> Option<T> {
+    let encoded = challenge.strip_prefix(CHALLENGE_PREFIX)?;
+    if encoded.is_empty()
+        || !encoded
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return None;
+    }
+    let raw = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(encoded: &str) -> Option<T> {

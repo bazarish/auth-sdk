@@ -8,10 +8,24 @@ const vector = JSON.parse(readFileSync(new URL('../../testdata/vectors.json', im
 const secret = Buffer.from(vector.secretHex, 'hex');
 const { consumer, now, challenge, blob } = vector;
 
-function rewrite(encoded, edit) {
-  const fields = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+const PREFIX = 'bazarish://sign?c=';
+
+function rewriteRaw(raw, edit) {
+  const fields = JSON.parse(raw.toString('utf8'));
   edit(fields);
-  return Buffer.from(JSON.stringify(fields)).toString('base64');
+  return Buffer.from(JSON.stringify(fields));
+}
+
+function rewrite(encoded, edit) {
+  return rewriteRaw(Buffer.from(encoded, 'base64'), edit).toString('base64');
+}
+
+function unlinked(link) {
+  return Buffer.from(link.slice(PREFIX.length), 'base64url');
+}
+
+function rewriteChallenge(link, edit) {
+  return PREFIX + rewriteRaw(unlinked(link), edit).toString('base64url');
 }
 
 async function refused(kind, verifier, testChallenge, testBlob, at = now) {
@@ -33,8 +47,8 @@ test('refusals', async (t) => {
     signature[0] ^= 1;
     fields[field] = signature.toString('base64');
   });
-  const nextVersion = rewrite(challenge, (fields) => { fields.v += 1; });
-  const nonAsciiTag = rewrite(challenge, (fields) => { fields.tag = 'тег'; });
+  const nextVersion = rewriteChallenge(challenge, (fields) => { fields.v += 1; });
+  const nonAsciiTag = rewriteChallenge(challenge, (fields) => { fields.tag = 'тег'; });
   const cases = [
     ['expired', new Verifier(secret, consumer), challenge, blob, now + WINDOW_SECONDS + 1],
     ['foreign_consumer', new Verifier(secret, reordered), challenge, blob, now],
@@ -48,6 +62,8 @@ test('refusals', async (t) => {
     ['wrong_key_type', new Verifier(secret, consumer), challenge, withPqKey(() => vector.mldsa44PublicKey), now],
     ['malformed_blob', new Verifier(secret, consumer), challenge, challenge, now],
     ['malformed_challenge', new Verifier(secret, consumer), '%%%', blob, now],
+    ['malformed_challenge', new Verifier(secret, consumer), unlinked(challenge).toString('base64'), blob, now],
+    ['malformed_challenge', new Verifier(secret, consumer), `${challenge}==`, blob, now],
   ];
   for (const [index, [kind, verifier, testChallenge, testBlob, at]] of cases.entries()) {
     await t.test(`${index}: ${kind}`, () => refused(kind, verifier, testChallenge, testBlob, at));
@@ -63,6 +79,29 @@ test('a bad blob does not burn the challenge', async () => {
 test('an issued challenge passes up to the blob', async () => {
   const verifier = new Verifier(secret, consumer);
   await refused('malformed_blob', verifier, verifier.issue(now), '');
+});
+
+test('a challenge with a callback', async () => {
+  const verifier = new Verifier(secret, consumer);
+  const host = consumer.place[1].slice('http://'.length);
+  const callback = `http://${host}/login?step=2`;
+  const issued = verifier.issue(now, callback);
+  assert.equal(JSON.parse(unlinked(issued).toString('utf8')).callback, callback);
+  await refused('malformed_blob', verifier, issued, '');
+  const elsewhere = `${'c'.repeat(52)}.b32.i2p`;
+  for (const callbackRefused of [
+    `http://${elsewhere}/login`,
+    `https://${host}/login`,
+    `http://${host}:8080/login`,
+    `http://${host}`,
+    `http://${host}/a b`,
+    `http://${host}/login#here`,
+    `http://${host}/say"hi"`,
+    'http://panel.example/login',
+  ]) {
+    assert.throws(() => verifier.issue(now, callbackRefused),
+      (error) => error instanceof LoginError && error.kind === 'invalid_callback', callbackRefused);
+  }
 });
 
 test('constructor refusals', () => {
