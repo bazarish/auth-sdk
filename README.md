@@ -30,6 +30,12 @@ in Go, `issue_with_callback` in Rust, the second argument of `issue` in Python
 and JavaScript). The client posts `{"challenge": ..., "blob": ...}` as JSON to
 the callback, and the site verifies the pair as in step 3.
 
+A challenge with a callback is too dense for a QR code a phone camera reads
+reliably. For a code, show a link to the challenge instead:
+`bazarish://sign?at=<host><path>`, where the host is the callback's host. Answer
+`GET <path>` on that host with the challenge as the whole body. The client
+refuses a challenge whose callback goes to another host.
+
 ## Several processes
 
 Every process that verifies logins for one consumer uses the same secret and the
