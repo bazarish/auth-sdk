@@ -11,7 +11,7 @@ const PLACES_MAX = 4;
 const SIGNED_VERSION = 'v2';
 const LOGIN_METHOD = 'BZ-LOGIN';
 const LOGIN_PATH = '/portal/login';
-const CHALLENGE_PREFIX = 'bazarish://sign?c=';
+const CHALLENGE_PREFIX = 'https://bazari.sh/#sign?c=';
 const CALLBACK_MAX = 256;
 const CALLBACK_SCHEME = 'http://';
 const B32_HOST = /^(?:[a-z2-7]{52}|[a-z2-7]{56})\.b32\.i2p$/;

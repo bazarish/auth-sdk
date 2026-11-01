@@ -34,7 +34,7 @@ const FORBIDDEN_CODE_POINTS: &[RangeInclusive<char>] = &[
 const SIGNED_VERSION: &str = "v2";
 const LOGIN_METHOD: &str = "BZ-LOGIN";
 const LOGIN_PATH: &str = "/portal/login";
-const CHALLENGE_PREFIX: &str = "bazarish://sign?c=";
+const CHALLENGE_PREFIX: &str = "https://bazari.sh/#sign?c=";
 const CALLBACK_MAX: usize = 256;
 const CALLBACK_SCHEME: &str = "http://";
 const B32_SUFFIX: &str = ".b32.i2p";

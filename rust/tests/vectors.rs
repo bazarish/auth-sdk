@@ -31,7 +31,7 @@ fn load() -> (Vector, Vec<u8>) {
     (vector, secret)
 }
 
-const CHALLENGE_PREFIX: &str = "bazarish://sign?c=";
+const CHALLENGE_PREFIX: &str = "https://bazari.sh/#sign?c=";
 
 fn rewrite(encoded: &str, edit: impl FnOnce(&mut Map<String, Value>)) -> String {
     STANDARD.encode(rewrite_raw(&STANDARD.decode(encoded).unwrap(), edit))

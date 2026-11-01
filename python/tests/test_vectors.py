@@ -11,7 +11,7 @@ CONSUMER = Consumer(VECTOR["consumer"]["name"], VECTOR["consumer"]["place"], VEC
 NOW = VECTOR["now"]
 
 
-PREFIX = "bazarish://sign?c="
+PREFIX = "https://bazari.sh/#sign?c="
 
 
 def rewrite(encoded, edit):

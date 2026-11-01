@@ -36,7 +36,7 @@ FORBIDDEN_CODE_POINTS = (
 SIGNED_VERSION = "v2"
 LOGIN_METHOD = "BZ-LOGIN"
 LOGIN_PATH = "/portal/login"
-CHALLENGE_PREFIX = "bazarish://sign?c="
+CHALLENGE_PREFIX = "https://bazari.sh/#sign?c="
 CALLBACK_MAX = 256
 CALLBACK_SCHEME = "http://"
 B32_SUFFIX = ".b32.i2p"

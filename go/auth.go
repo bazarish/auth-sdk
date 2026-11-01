@@ -31,7 +31,7 @@ const (
 	signedVersion    = "v2"
 	loginMethod      = "BZ-LOGIN"
 	loginPath        = "/portal/login"
-	challengePrefix  = "bazarish://sign?c="
+	challengePrefix  = "https://bazari.sh/#sign?c="
 	callbackMax      = 256
 	callbackScheme   = "http://"
 	b32Suffix        = ".b32.i2p"

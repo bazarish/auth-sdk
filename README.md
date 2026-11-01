@@ -18,7 +18,7 @@ A site signs a user in with three calls:
 1. Create a verifier from a secret of at least 32 random bytes and the consumer.
    The consumer is the site's name, up to four addresses it answers at, and the
    role being signed into.
-2. Show the user the challenge that `issue` returns: a `bazarish://sign` link,
+2. Show the user the challenge that `issue` returns: an `https://bazari.sh/#sign` link,
    as text, a link or a QR code. The user signs it in their Bazarish client and
    pastes the result back.
 3. Pass the challenge and the pasted text to `verify`. It returns the signer's
@@ -32,7 +32,7 @@ the callback, and the site verifies the pair as in step 3.
 
 A challenge with a callback is too dense for a QR code a phone camera reads
 reliably. For a code, show a link to the challenge instead:
-`bazarish://sign?at=<host><path>`, where the host is the callback's host. Answer
+`https://bazari.sh/#sign?at=<host><path>`, where the host is the callback's host. Answer
 `GET <path>` on that host with the challenge as the whole body. The client
 refuses a challenge whose callback goes to another host.
 
