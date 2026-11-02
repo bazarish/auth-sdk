@@ -8,7 +8,7 @@ const vector = JSON.parse(readFileSync(new URL('../../testdata/vectors.json', im
 const secret = Buffer.from(vector.secretHex, 'hex');
 const { consumer, now, challenge, blob } = vector;
 
-const PREFIX = 'https://bazari.sh/#sign?c=';
+const PREFIX = 'bazarish://sign?c=';
 
 function rewriteRaw(raw, edit) {
   const fields = JSON.parse(raw.toString('utf8'));
