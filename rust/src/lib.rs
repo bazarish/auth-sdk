@@ -70,7 +70,7 @@ impl fmt::Display for Error {
             Error::ShortSecret => f.write_str("the secret is shorter than 32 bytes"),
             Error::InvalidConsumer => f.write_str("the consumer breaks the protocol's limits"),
             Error::InvalidCallback => {
-                f.write_str("the callback is not one of the consumer's I2P places")
+                f.write_str("the callback is not an http path on a .b32.i2p address")
             }
             Error::MalformedChallenge => f.write_str("this is not a login challenge"),
             Error::ForeignConsumer => f.write_str("the challenge names another consumer"),
@@ -145,7 +145,6 @@ impl NonceStore for MemoryNonceStore {
 pub struct Verifier<S: NonceStore = MemoryNonceStore> {
     secret: Vec<u8>,
     canonical: String,
-    places: Vec<String>,
     store: S,
 }
 
@@ -166,7 +165,6 @@ impl<S: NonceStore> Verifier<S> {
         Ok(Verifier {
             secret: secret.to_vec(),
             canonical: consumer.canonical(),
-            places: consumer.place.clone(),
             store,
         })
     }
@@ -177,7 +175,7 @@ impl<S: NonceStore> Verifier<S> {
 
     /// Names where the client may send the blob itself.
     pub fn issue_with_callback(&self, now: i64, callback: &str) -> Result<String, Error> {
-        if !callback_usable(callback, &self.places) {
+        if !callback_usable(callback) {
             return Err(Error::InvalidCallback);
         }
         self.issue_to(now, Some(callback))
@@ -193,7 +191,7 @@ impl<S: NonceStore> Verifier<S> {
         let challenge = format!(
             r#"{{{head}"consumer":{},"nonce":"{nonce}","tag":"{}","ts":{now},"v":{CHALLENGE_VERSION}}}"#,
             self.canonical,
-            self.tag(&nonce, now)?
+            self.tag(&nonce, now, callback.unwrap_or_default())?
         );
         Ok(format!(
             "{CHALLENGE_PREFIX}{}",
@@ -209,6 +207,8 @@ impl<S: NonceStore> Verifier<S> {
             ts: i64,
             consumer: Consumer,
             tag: String,
+            #[serde(default)]
+            callback: String,
         }
         let envelope: Envelope = decode_challenge(challenge).ok_or(Error::MalformedChallenge)?;
         if envelope.v != CHALLENGE_VERSION || !envelope.consumer.usable() {
@@ -220,7 +220,7 @@ impl<S: NonceStore> Verifier<S> {
         if !fresh(envelope.ts, now) {
             return Err(Error::Expired);
         }
-        let expected = self.tag(&envelope.nonce, envelope.ts)?;
+        let expected = self.tag(&envelope.nonce, envelope.ts, &envelope.callback)?;
         if envelope.tag.len() != expected.len()
             || !memcmp::eq(envelope.tag.as_bytes(), expected.as_bytes())
         {
@@ -237,10 +237,10 @@ impl<S: NonceStore> Verifier<S> {
         Ok(fingerprint)
     }
 
-    fn tag(&self, nonce: &str, ts: i64) -> Result<String, Error> {
+    fn tag(&self, nonce: &str, ts: i64, callback: &str) -> Result<String, Error> {
         let key = PKey::hmac(&self.secret)?;
         let mut signer = Signer::new(MessageDigest::sha256(), &key)?;
-        signer.update(format!("{nonce}\n{ts}\n{}", self.canonical).as_bytes())?;
+        signer.update(format!("{nonce}\n{ts}\n{}\n{callback}", self.canonical).as_bytes())?;
         Ok(hex(&signer.sign_to_vec()?))
     }
 }
@@ -311,7 +311,7 @@ fn usable_field(value: &str, limit: usize) -> bool {
         })
 }
 
-fn callback_usable(callback: &str, places: &[String]) -> bool {
+fn callback_usable(callback: &str) -> bool {
     let Some(rest) = callback.strip_prefix(CALLBACK_SCHEME) else {
         return false;
     };
@@ -323,16 +323,6 @@ fn callback_usable(callback: &str, places: &[String]) -> bool {
         && path
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || CALLBACK_MARKS.contains(c))
-        && places.iter().any(|place| place_host(place) == Some(host))
-}
-
-fn place_host(place: &str) -> Option<&str> {
-    let rest = match place.strip_prefix(CALLBACK_SCHEME) {
-        Some(rest) => rest,
-        None if place.contains("://") => return None,
-        None => place,
-    };
-    Some(rest.split('/').next().unwrap_or(rest))
 }
 
 fn is_b32_host(host: &str) -> bool {

@@ -24,11 +24,13 @@ A site signs a user in with three calls:
 3. Pass the challenge and the pasted text to `verify`. It returns the signer's
    fingerprint or an error that names the reason.
 
-A site reachable at a `.b32.i2p` address can let the client send the result
+A site that answers at a `.b32.i2p` address can let the client send the result
 itself: issue the challenge with a callback on that address (`IssueWithCallback`
 in Go, `issue_with_callback` in Rust, the second argument of `issue` in Python
-and JavaScript). The client posts `{"challenge": ..., "blob": ...}` as JSON to
-the callback, and the site verifies the pair as in step 3.
+and JavaScript). The address does not have to be one of the consumer's places.
+The client posts `{"challenge": ..., "blob": ...}` as JSON to the callback, and
+the site verifies the pair as in step 3. The challenge's tag covers the
+callback, so `verify` refuses a challenge whose callback was changed.
 
 A challenge with a callback is too dense for a QR code a phone camera reads
 reliably. For a code, show a link to the challenge instead:

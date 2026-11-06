@@ -60,7 +60,6 @@ export class MemoryNonceStore {
 export class Verifier {
   #secret;
   #canonical;
-  #places;
   #store;
 
   constructor(secret, consumer, store = new MemoryNonceStore()) {
@@ -72,19 +71,18 @@ export class Verifier {
     }
     this.#secret = Buffer.from(secret);
     this.#canonical = canonical(consumer);
-    this.#places = [...consumer.place];
     this.#store = store;
   }
 
   // A callback names where the client may send the blob itself.
   issue(now = currentSeconds(), callback = undefined) {
-    if (callback !== undefined && !callbackUsable(callback, this.#places)) {
-      throw new LoginError('invalid_callback', "the callback is not one of the consumer's I2P places");
+    if (callback !== undefined && !callbackUsable(callback)) {
+      throw new LoginError('invalid_callback', 'the callback is not an http path on a .b32.i2p address');
     }
     const ts = Math.floor(now);
     const nonce = randomBytes(NONCE_BYTES).toString('hex');
     const head = callback === undefined ? '' : `"callback":"${callback}",`;
-    const challenge = `{${head}"consumer":${this.#canonical},"nonce":"${nonce}","tag":"${this.#tag(nonce, ts)}",`
+    const challenge = `{${head}"consumer":${this.#canonical},"nonce":"${nonce}","tag":"${this.#tag(nonce, ts, callback ?? '')}",`
       + `"ts":${ts},"v":${CHALLENGE_VERSION}}`;
     return CHALLENGE_PREFIX + Buffer.from(challenge).toString('base64url');
   }
@@ -92,7 +90,8 @@ export class Verifier {
   async verify(challenge, blob, now = currentSeconds()) {
     const envelope = decodeChallenge(challenge);
     if (envelope?.v !== CHALLENGE_VERSION || !usable(envelope.consumer)
-        || !Number.isSafeInteger(envelope.ts) || typeof envelope.nonce !== 'string') {
+        || !Number.isSafeInteger(envelope.ts) || typeof envelope.nonce !== 'string'
+        || typeof (envelope.callback ?? '') !== 'string') {
       throw new LoginError('malformed_challenge', 'this is not a login challenge');
     }
     if (canonical(envelope.consumer) !== this.#canonical) {
@@ -101,7 +100,7 @@ export class Verifier {
     if (!fresh(envelope.ts, now)) {
       throw new LoginError('expired', 'the challenge has expired');
     }
-    const expected = Buffer.from(this.#tag(envelope.nonce, envelope.ts));
+    const expected = Buffer.from(this.#tag(envelope.nonce, envelope.ts, envelope.callback ?? ''));
     const presented = Buffer.from(String(envelope.tag));
     if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
       throw new LoginError('unknown_challenge', 'the challenge was not issued here');
@@ -113,8 +112,9 @@ export class Verifier {
     return fingerprint;
   }
 
-  #tag(nonce, ts) {
-    return createHmac('sha256', this.#secret).update(`${nonce}\n${ts}\n${this.#canonical}`).digest('hex');
+  #tag(nonce, ts, callback) {
+    return createHmac('sha256', this.#secret)
+      .update(`${nonce}\n${ts}\n${this.#canonical}\n${callback}`).digest('hex');
   }
 }
 
@@ -174,7 +174,7 @@ function canonical(consumer) {
   return JSON.stringify({ name: consumer.name, place: consumer.place, role: consumer.role });
 }
 
-function callbackUsable(callback, places) {
+function callbackUsable(callback) {
   if (typeof callback !== 'string' || callback.length > CALLBACK_MAX || !callback.startsWith(CALLBACK_SCHEME)) {
     return false;
   }
@@ -184,18 +184,7 @@ function callbackUsable(callback, places) {
     return false;
   }
   const host = rest.slice(0, slash);
-  return B32_HOST.test(host) && CALLBACK_PATH.test(rest.slice(slash))
-    && places.some((place) => placeHost(place) === host);
-}
-
-function placeHost(place) {
-  let rest = place;
-  if (rest.startsWith(CALLBACK_SCHEME)) {
-    rest = rest.slice(CALLBACK_SCHEME.length);
-  } else if (rest.includes('://')) {
-    return undefined;
-  }
-  return rest.split('/')[0];
+  return B32_HOST.test(host) && CALLBACK_PATH.test(rest.slice(slash));
 }
 
 function decodeChallenge(challenge) {

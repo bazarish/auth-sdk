@@ -243,8 +243,38 @@ fn issue_with_callback() {
         Err(Error::MalformedBlob)
     ));
     let elsewhere = format!("{}.b32.i2p", "c".repeat(52));
+    let unlisted = verifier
+        .issue_with_callback(vector.now, &format!("http://{elsewhere}/login"))
+        .unwrap();
+    assert!(matches!(
+        verifier.verify(&unlisted, "", vector.now),
+        Err(Error::MalformedBlob)
+    ));
+    let plain = verifier.issue(vector.now).unwrap();
+    let forged = [
+        rewrite_challenge(&challenge, |fields| {
+            fields.insert(
+                "callback".into(),
+                format!("http://{elsewhere}/login?step=2").into(),
+            );
+        }),
+        rewrite_challenge(&challenge, |fields| {
+            fields.insert("callback".into(), format!("http://{host}/x").into());
+        }),
+        rewrite_challenge(&challenge, |fields| {
+            fields.remove("callback");
+        }),
+        rewrite_challenge(&plain, |fields| {
+            fields.insert("callback".into(), format!("http://{host}/login").into());
+        }),
+    ];
+    for forged in forged {
+        assert!(matches!(
+            verifier.verify(&forged, "", vector.now),
+            Err(Error::UnknownChallenge)
+        ));
+    }
     for refused in [
-        format!("http://{elsewhere}/login"),
         format!("https://{host}/login"),
         format!("http://{host}:8080/login"),
         format!("http://{host}"),

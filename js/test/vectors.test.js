@@ -89,8 +89,17 @@ test('a challenge with a callback', async () => {
   assert.equal(JSON.parse(unlinked(issued).toString('utf8')).callback, callback);
   await refused('malformed_blob', verifier, issued, '');
   const elsewhere = `${'c'.repeat(52)}.b32.i2p`;
+  await refused('malformed_blob', verifier, verifier.issue(now, `http://${elsewhere}/login`), '');
+  const plain = verifier.issue(now);
+  for (const forged of [
+    rewriteChallenge(issued, (fields) => { fields.callback = `http://${elsewhere}/login?step=2`; }),
+    rewriteChallenge(issued, (fields) => { fields.callback = `http://${host}/x`; }),
+    rewriteChallenge(issued, (fields) => { delete fields.callback; }),
+    rewriteChallenge(plain, (fields) => { fields.callback = `http://${host}/login`; }),
+  ]) {
+    await refused('unknown_challenge', verifier, forged, '');
+  }
   for (const callbackRefused of [
-    `http://${elsewhere}/login`,
     `https://${host}/login`,
     `http://${host}:8080/login`,
     `http://${host}`,

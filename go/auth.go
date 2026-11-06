@@ -52,7 +52,7 @@ var forbiddenCodePoints = []struct{ first, last rune }{
 
 var (
 	ErrInvalidConsumer    = errors.New("bazarishauth: the consumer breaks the protocol's limits")
-	ErrInvalidCallback    = errors.New("bazarishauth: the callback is not one of the consumer's I2P places")
+	ErrInvalidCallback    = errors.New("bazarishauth: the callback is not an http path on a .b32.i2p address")
 	ErrShortSecret        = errors.New("bazarishauth: the secret is shorter than 32 bytes")
 	ErrMalformedChallenge = errors.New("bazarishauth: this is not a login challenge")
 	ErrForeignConsumer    = errors.New("bazarishauth: the challenge names another consumer")
@@ -101,7 +101,6 @@ func (s *MemoryNonceStore) Consume(nonce string, now, until time.Time) (bool, er
 type Verifier struct {
 	secret    []byte
 	canonical string
-	places    []string
 	store     NonceStore
 }
 
@@ -115,7 +114,6 @@ func NewVerifier(secret []byte, consumer Consumer, store NonceStore) (*Verifier,
 	return &Verifier{
 		secret:    append([]byte(nil), secret...),
 		canonical: consumer.canonical(),
-		places:    append([]string(nil), consumer.Place...),
 		store:     store,
 	}, nil
 }
@@ -126,7 +124,7 @@ func (v *Verifier) Issue(now time.Time) (string, error) {
 
 // IssueWithCallback names where the client may send the blob itself.
 func (v *Verifier) IssueWithCallback(now time.Time, callback string) (string, error) {
-	if !callbackUsable(callback, v.places) {
+	if !callbackUsable(callback) {
 		return "", ErrInvalidCallback
 	}
 	return v.issue(now, callback)
@@ -143,7 +141,7 @@ func (v *Verifier) issue(now time.Time, callback string) (string, error) {
 	if callback != "" {
 		head += `"callback":"` + callback + `",`
 	}
-	challenge := head + `"consumer":` + v.canonical + `,"nonce":"` + nonce + `","tag":"` + v.tag(nonce, ts) +
+	challenge := head + `"consumer":` + v.canonical + `,"nonce":"` + nonce + `","tag":"` + v.tag(nonce, ts, callback) +
 		`","ts":` + strconv.FormatInt(ts, 10) + `,"v":` + strconv.Itoa(challengeVersion) + `}`
 	return challengePrefix + base64.RawURLEncoding.EncodeToString([]byte(challenge)), nil
 }
@@ -155,6 +153,7 @@ func (v *Verifier) Verify(challenge, blob string, now time.Time) (string, error)
 		Ts       int64     `json:"ts"`
 		Consumer *Consumer `json:"consumer"`
 		Tag      string    `json:"tag"`
+		Callback string    `json:"callback"`
 	}
 	if decodeChallenge(challenge, &envelope) != nil || envelope.V != challengeVersion ||
 		envelope.Consumer == nil || !envelope.Consumer.usable() {
@@ -166,7 +165,7 @@ func (v *Verifier) Verify(challenge, blob string, now time.Time) (string, error)
 	if !fresh(envelope.Ts, now) {
 		return "", ErrExpired
 	}
-	if !hmac.Equal([]byte(envelope.Tag), []byte(v.tag(envelope.Nonce, envelope.Ts))) {
+	if !hmac.Equal([]byte(envelope.Tag), []byte(v.tag(envelope.Nonce, envelope.Ts, envelope.Callback))) {
 		return "", ErrUnknownChallenge
 	}
 	fingerprint, err := verifyBlob(blob, challenge, now)
@@ -183,9 +182,9 @@ func (v *Verifier) Verify(challenge, blob string, now time.Time) (string, error)
 	return fingerprint, nil
 }
 
-func (v *Verifier) tag(nonce string, ts int64) string {
+func (v *Verifier) tag(nonce string, ts int64, callback string) string {
 	mac := hmac.New(sha256.New, v.secret)
-	mac.Write([]byte(nonce + "\n" + strconv.FormatInt(ts, 10) + "\n" + v.canonical))
+	mac.Write([]byte(nonce + "\n" + strconv.FormatInt(ts, 10) + "\n" + v.canonical + "\n" + callback))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -285,7 +284,7 @@ func fresh(ts int64, now time.Time) bool {
 	return ts >= now.Unix()-windowSeconds && ts <= now.Unix()+windowSeconds
 }
 
-func callbackUsable(callback string, places []string) bool {
+func callbackUsable(callback string) bool {
 	rest, found := strings.CutPrefix(callback, callbackScheme)
 	if !found || len(callback) > callbackMax {
 		return false
@@ -299,21 +298,7 @@ func callbackUsable(callback string, places []string) bool {
 			return false
 		}
 	}
-	for _, place := range places {
-		if placeHost(place) == host {
-			return true
-		}
-	}
-	return false
-}
-
-func placeHost(place string) string {
-	rest, found := strings.CutPrefix(place, callbackScheme)
-	if !found && strings.Contains(place, "://") {
-		return ""
-	}
-	host, _, _ := strings.Cut(rest, "/")
-	return host
+	return true
 }
 
 func isB32Host(host string) bool {

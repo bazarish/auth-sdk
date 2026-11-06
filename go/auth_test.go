@@ -207,8 +207,27 @@ func TestIssueWithCallback(t *testing.T) {
 	_, err = subject.Verify(challenge, "", now)
 	expect(t, err, ErrMalformedBlob)
 	elsewhere := strings.Repeat("c", b32LabelChars) + b32Suffix
+	unlisted, err := subject.IssueWithCallback(now, callbackScheme+elsewhere+"/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = subject.Verify(unlisted, "", now)
+	expect(t, err, ErrMalformedBlob)
+	plain, err := subject.Issue(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := []string{
+		edited(t, challenge, func(e map[string]any) { e["callback"] = callbackScheme + elsewhere + "/login?step=2" }),
+		edited(t, challenge, func(e map[string]any) { e["callback"] = callbackScheme + host + "/x" }),
+		edited(t, challenge, func(e map[string]any) { delete(e, "callback") }),
+		edited(t, plain, func(e map[string]any) { e["callback"] = callbackScheme + host + "/login" }),
+	}
+	for _, challenge := range forged {
+		_, err := subject.Verify(challenge, "", now)
+		expect(t, err, ErrUnknownChallenge)
+	}
 	refused := []string{
-		callbackScheme + elsewhere + "/login",
 		"https://" + host + "/login",
 		callbackScheme + host + ":8080/login",
 		callbackScheme + host,
@@ -221,6 +240,20 @@ func TestIssueWithCallback(t *testing.T) {
 		_, err := subject.IssueWithCallback(now, callback)
 		expect(t, err, ErrInvalidCallback)
 	}
+}
+
+func edited(t *testing.T, challenge string, change func(map[string]any)) string {
+	t.Helper()
+	envelope := map[string]any{}
+	if err := decodeChallenge(challenge, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	change(envelope)
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return challengePrefix + base64.RawURLEncoding.EncodeToString(raw)
 }
 
 func TestConstructorRefusals(t *testing.T) {

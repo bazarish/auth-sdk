@@ -96,19 +96,18 @@ class Verifier:
             raise LoginError("invalid_consumer", "the consumer breaks the protocol's limits")
         self._secret = bytes(secret)
         self._canonical = consumer._canonical()
-        self._places = list(consumer.place)
         self._store = store if store is not None else MemoryNonceStore()
 
     def issue(self, now=None, callback=None):
         """A callback names where the client may send the blob itself."""
-        if callback is not None and not _callback_usable(callback, self._places):
-            raise LoginError("invalid_callback", "the callback is not one of the consumer's I2P places")
+        if callback is not None and not _callback_usable(callback):
+            raise LoginError("invalid_callback", "the callback is not an http path on a .b32.i2p address")
         now = int(time.time() if now is None else now)
         nonce = os.urandom(NONCE_BYTES).hex()
         challenge = {
             "consumer": json.loads(self._canonical),
             "nonce": nonce,
-            "tag": self._tag(nonce, now),
+            "tag": self._tag(nonce, now, callback or ""),
             "ts": now,
             "v": CHALLENGE_VERSION,
         }
@@ -121,22 +120,28 @@ class Verifier:
         now = int(time.time() if now is None else now)
         envelope = _decode_challenge(challenge)
         consumer = _consumer_of(envelope)
-        if consumer is None or not _is_int(envelope.get("ts")) or not isinstance(envelope.get("nonce"), str):
+        callback = envelope.get("callback", "") if isinstance(envelope, dict) else None
+        if (
+            consumer is None
+            or not _is_int(envelope.get("ts"))
+            or not isinstance(envelope.get("nonce"), str)
+            or not isinstance(callback, str)
+        ):
             raise LoginError("malformed_challenge", "this is not a login challenge")
         if consumer._canonical() != self._canonical:
             raise LoginError("foreign_consumer", "the challenge names another consumer")
         if not _fresh(envelope["ts"], now):
             raise LoginError("expired", "the challenge has expired")
         tag = envelope.get("tag")
-        if not isinstance(tag, str) or not hmac.compare_digest(tag.encode(), self._tag(envelope["nonce"], envelope["ts"]).encode()):
+        if not isinstance(tag, str) or not hmac.compare_digest(tag.encode(), self._tag(envelope["nonce"], envelope["ts"], callback).encode()):
             raise LoginError("unknown_challenge", "the challenge was not issued here")
         fingerprint = _verify_blob(blob, challenge, now)
         if not self._store.consume(envelope["nonce"], now, envelope["ts"] + WINDOW_SECONDS):
             raise LoginError("already_used", "the challenge has already been used")
         return fingerprint
 
-    def _tag(self, nonce, ts):
-        message = f"{nonce}\n{ts}\n{self._canonical}".encode()
+    def _tag(self, nonce, ts, callback):
+        message = f"{nonce}\n{ts}\n{self._canonical}\n{callback}".encode()
         return hmac.new(self._secret, message, hashlib.sha256).hexdigest()
 
 
@@ -193,7 +198,7 @@ def _usable_field(value, limit):
     )
 
 
-def _callback_usable(callback, places):
+def _callback_usable(callback):
     if not isinstance(callback, str) or len(callback) > CALLBACK_MAX or not callback.startswith(CALLBACK_SCHEME):
         return False
     host, slash, path = callback[len(CALLBACK_SCHEME):].partition("/")
@@ -201,16 +206,7 @@ def _callback_usable(callback, places):
         slash == "/"
         and _is_b32_host(host)
         and all(character in CALLBACK_PATH_CHARS for character in path)
-        and any(_place_host(place) == host for place in places)
     )
-
-
-def _place_host(place):
-    if place.startswith(CALLBACK_SCHEME):
-        place = place[len(CALLBACK_SCHEME):]
-    elif "://" in place:
-        return None
-    return place.partition("/")[0]
 
 
 def _is_b32_host(host):

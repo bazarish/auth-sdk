@@ -98,8 +98,17 @@ class VectorTest(unittest.TestCase):
         self.assertEqual(json.loads(unlinked(challenge))["callback"], callback)
         self.refused("malformed_blob", verifier, challenge, "")
         elsewhere = "c" * 52 + ".b32.i2p"
+        self.refused("malformed_blob", verifier, verifier.issue(NOW, f"http://{elsewhere}/login"), "")
+        plain = verifier.issue(NOW)
+        forged = [
+            rewrite_challenge(challenge, lambda fields: fields.update(callback=f"http://{elsewhere}/login?step=2")),
+            rewrite_challenge(challenge, lambda fields: fields.update(callback=f"http://{host}/x")),
+            rewrite_challenge(challenge, lambda fields: fields.pop("callback")),
+            rewrite_challenge(plain, lambda fields: fields.update(callback=f"http://{host}/login")),
+        ]
+        for edited in forged:
+            self.refused("unknown_challenge", verifier, edited, "")
         for refused in [
-            f"http://{elsewhere}/login",
             f"https://{host}/login",
             f"http://{host}:8080/login",
             f"http://{host}",
