@@ -6,7 +6,7 @@ The protocol is specified in
 
 | Language | Directory | Minimum | Tests |
 |---|---|---|---|
-| Go | `go` | Go 1.27 | `go test ./...` |
+| Go | `go` | Go 1.27, golang.org/x/crypto | `go test ./...` |
 | Rust | `rust` | Rust 1.85, OpenSSL 3.5 | `cargo test` |
 | Python | `python` | Python 3.9, cryptography 48 | `python -m unittest discover -s tests` |
 | JavaScript | `js` | Node.js 24.6 | `node --test` |
@@ -28,15 +28,29 @@ A site that answers at a `.b32.i2p` address can let the client send the result
 itself: issue the challenge with a callback on that address (`IssueWithCallback`
 in Go, `issue_with_callback` in Rust, the second argument of `issue` in Python
 and JavaScript). The address does not have to be one of the consumer's places.
-The client posts `{"challenge": ..., "blob": ...}` as JSON to the callback, and
-the site verifies the pair as in step 3. The challenge's tag covers the
-callback, so `verify` refuses a challenge whose callback was changed.
+The challenge's tag covers the callback, so `verify` refuses a challenge whose
+callback was changed.
 
-A challenge with a callback is too dense for a QR code a phone camera reads
-reliably. For a code, show a link to the challenge instead:
-`bazarish://sign?at=<host><path>`, where the host is the callback's host. Answer
-`GET <path>` on that host with the challenge as the whole body. The client
-refuses a challenge whose callback goes to another host.
+Both exchanges over I2P are sealed under a key the site makes for that one
+challenge (`NewKey` / `new_key` / `newKey`) and keeps beside the challenge's
+nonce until the sign-in ends:
+
+- A link that hands the challenge over carries the key: `WithKey` / `with_key` /
+  `withKey` appends `&key=` to it. A challenge with a callback is too dense for a
+  QR code a phone camera reads reliably, so for a code show a link to it instead,
+  `bazarish://sign?at=<host><path>` with the key appended, where the host is the
+  callback's host. Answer `GET <path>` on that host with `SealChallenge` /
+  `seal_challenge` / `sealChallenge` of the challenge as the whole body. The client
+  refuses a link without a key and a challenge whose callback goes to another host.
+- The client posts `{"nonce": ..., "sealed": ...}` to the callback. Find the key
+  by `AnswerNonce` / `answer_nonce` / `answerNonce`, open the body with
+  `OpenAnswer` / `open_answer` / `openAnswer`, and verify the challenge and blob it
+  returns as in step 3. A body sealed under another key, or one that answers
+  another challenge than its nonce, fails with `malformed_answer`.
+
+The key is not part of the challenge; a challenge pasted into a form needs none.
+The Go module takes ChaCha20-Poly1305 from `golang.org/x/crypto`, as the
+standard library does not export it.
 
 ## Several processes
 

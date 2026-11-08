@@ -2,7 +2,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { LoginError, NONCE_BYTES, SECRET_MIN_BYTES, Verifier, WINDOW_SECONDS } from '../index.js';
+import {
+  LoginError,
+  NONCE_BYTES,
+  SECRET_MIN_BYTES,
+  Verifier,
+  WINDOW_SECONDS,
+  answerNonce,
+  newKey,
+  openAnswer,
+  sealChallenge,
+  withKey,
+} from '../index.js';
 
 const vector = JSON.parse(readFileSync(new URL('../../testdata/vectors.json', import.meta.url)));
 const secret = Buffer.from(vector.secretHex, 'hex');
@@ -136,4 +147,34 @@ test('consumer code points', () => {
   for (const [index, character] of allowed.entries()) {
     assert.doesNotThrow(() => new Verifier(secret, named(character)), `allowed ${index}`);
   }
+});
+
+const sealing = vector.sealing;
+const sealingKey = Buffer.from(sealing.key, 'base64url');
+
+test('the vector answer opens and verifies', async () => {
+  assert.equal(answerNonce(sealing.answerBody), JSON.parse(unlinked(challenge)).nonce);
+  const opened = openAnswer(sealingKey, sealing.answerBody);
+  assert.deepEqual(opened, { challenge, blob });
+  assert.equal(await new Verifier(secret, consumer).verify(opened.challenge, opened.blob, now), vector.fingerprint);
+});
+
+test('a wrong answer is refused', () => {
+  const renamed = JSON.stringify({ ...JSON.parse(sealing.answerBody), nonce: '0'.repeat(32) });
+  for (const wrong of [
+    () => openAnswer(newKey(), sealing.answerBody),
+    () => openAnswer(sealingKey, renamed),
+    () => openAnswer(sealingKey, 'not json'),
+    () => answerNonce('{}'),
+  ]) {
+    assert.throws(wrong, (error) => error instanceof LoginError && error.kind === 'malformed_answer');
+  }
+});
+
+test('a sealed challenge and a keyed link', () => {
+  const sealed = sealChallenge(sealingKey, challenge);
+  assert.equal(sealed.length, Buffer.from(sealing.sealedChallenge, 'base64').length);
+  assert.notDeepEqual(sealed, Buffer.from(sealing.sealedChallenge, 'base64'));
+  assert.equal(withKey(challenge, sealingKey), sealing.keyedLink);
+  assert.throws(() => withKey(challenge, Buffer.alloc(1)), RangeError);
 });

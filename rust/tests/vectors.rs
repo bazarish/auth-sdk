@@ -1,6 +1,9 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use bazarish_auth::{Consumer, Error, NONCE_BYTES, SECRET_MIN_BYTES, Verifier, WINDOW_SECONDS};
+use bazarish_auth::{
+    Consumer, Error, NONCE_BYTES, SECRET_MIN_BYTES, Verifier, WINDOW_SECONDS, answer_nonce,
+    new_key, open_answer, seal_challenge, with_key,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::mem::discriminant;
@@ -15,6 +18,16 @@ struct Vector {
     blob: String,
     fingerprint: String,
     mldsa44_public_key: String,
+    sealing: Sealing,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Sealing {
+    key: String,
+    sealed_challenge: String,
+    answer_body: String,
+    keyed_link: String,
 }
 
 fn load() -> (Vector, Vec<u8>) {
@@ -350,4 +363,65 @@ fn consumer_code_points() {
             "{character:?}"
         );
     }
+}
+
+#[test]
+fn the_vector_answer_opens_and_verifies() {
+    let (vector, secret) = load();
+    let key = URL_SAFE_NO_PAD.decode(&vector.sealing.key).unwrap();
+    let body = vector.sealing.answer_body.as_bytes();
+    let nonce = answer_nonce(body).unwrap();
+    let encoded = vector.challenge.strip_prefix("bazarish://sign?c=").unwrap();
+    let envelope: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+    assert_eq!(envelope["nonce"], Value::String(nonce));
+    let (challenge, blob) = open_answer(&key, body).unwrap();
+    assert_eq!(
+        (challenge.as_str(), blob.as_str()),
+        (vector.challenge.as_str(), vector.blob.as_str())
+    );
+    let verifier = Verifier::new(&secret, &vector.consumer).unwrap();
+    assert_eq!(
+        verifier.verify(&challenge, &blob, vector.now).unwrap(),
+        vector.fingerprint
+    );
+}
+
+#[test]
+fn a_wrong_answer_is_refused() {
+    let (vector, _) = load();
+    let key = URL_SAFE_NO_PAD.decode(&vector.sealing.key).unwrap();
+    let body = vector.sealing.answer_body.as_bytes();
+    let mut outer: Map<String, Value> = serde_json::from_slice(body).unwrap();
+    outer.insert("nonce".into(), Value::String("0".repeat(32)));
+    let renamed = serde_json::to_vec(&outer).unwrap();
+    for (sealing, sent) in [
+        (new_key().unwrap(), body.to_vec()),
+        (key.clone(), renamed),
+        (key.clone(), b"not json".to_vec()),
+    ] {
+        assert!(matches!(
+            open_answer(&sealing, &sent),
+            Err(Error::MalformedAnswer)
+        ));
+    }
+    assert!(matches!(answer_nonce(b"{}"), Err(Error::MalformedAnswer)));
+}
+
+#[test]
+fn a_sealed_challenge_and_a_keyed_link() {
+    let (vector, _) = load();
+    let key = URL_SAFE_NO_PAD.decode(&vector.sealing.key).unwrap();
+    let vector_sealed = STANDARD.decode(&vector.sealing.sealed_challenge).unwrap();
+    let sealed = seal_challenge(&key, &vector.challenge).unwrap();
+    assert_eq!(sealed.len(), vector_sealed.len());
+    assert_ne!(sealed, vector_sealed);
+    assert_eq!(
+        with_key(&vector.challenge, &key).unwrap(),
+        vector.sealing.keyed_link
+    );
+    assert!(matches!(
+        with_key(&vector.challenge, &key[..1]),
+        Err(Error::KeySize)
+    ));
 }

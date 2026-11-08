@@ -9,12 +9,25 @@ import time
 from dataclasses import dataclass
 from typing import Sequence
 
-from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+from cryptography.exceptions import InvalidSignature, InvalidTag, UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.mldsa import MLDSA65PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import load_der_public_key
 
-__all__ = ["Consumer", "LoginError", "MemoryNonceStore", "Verifier"]
+__all__ = [
+    "Consumer",
+    "LoginError",
+    "MemoryNonceStore",
+    "Verifier",
+    "answer_nonce",
+    "new_key",
+    "open_answer",
+    "seal_challenge",
+    "with_key",
+]
 
 CHALLENGE_VERSION = 1
 WINDOW_SECONDS = 300
@@ -46,6 +59,12 @@ BASE32_LABEL_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz234567")
 CALLBACK_PATH_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~!$&'()*+,;=:@/?%"
 )
+# SignInWithKey.md, "The key".
+KEY_BYTES = 32
+KEY_FIELD = "&key="
+AEAD_NONCE_BYTES = 12
+CHALLENGE_LABEL = b"bazarish sign-in challenge v1"
+ANSWER_LABEL = b"bazarish sign-in answer v1"
 BASE64URL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 
 
@@ -245,3 +264,68 @@ def _is_int(value):
 
 def _fresh(ts, now):
     return now - WINDOW_SECONDS <= ts <= now + WINDOW_SECONDS
+
+
+def new_key():
+    return os.urandom(KEY_BYTES)
+
+
+def with_key(link, key):
+    if len(key) != KEY_BYTES:
+        raise ValueError("a key is %d bytes" % KEY_BYTES)
+    return link + KEY_FIELD + base64.urlsafe_b64encode(key).decode().rstrip("=")
+
+
+def seal_challenge(key, challenge):
+    return _seal(key, CHALLENGE_LABEL, challenge.encode())
+
+
+def answer_nonce(body):
+    outer = _answer_outer(body)
+    return outer["nonce"]
+
+
+def open_answer(key, body):
+    outer = _answer_outer(body)
+    try:
+        sealed = base64.b64decode(outer["sealed"], validate=True)
+    except (ValueError, TypeError, binascii.Error):
+        raise LoginError("malformed_answer", "the answer is not base64") from None
+    opened = _open(key, ANSWER_LABEL, sealed)
+    try:
+        inner = json.loads(opened)
+        challenge, blob = inner["challenge"], inner["blob"]
+    except (ValueError, TypeError, KeyError):
+        raise LoginError("malformed_answer", "the answer does not read") from None
+    envelope = _decode_challenge(challenge)
+    if not isinstance(envelope, dict) or envelope.get("nonce") != outer["nonce"]:
+        raise LoginError("malformed_answer", "the answer is for another challenge")
+    return challenge, blob
+
+
+def _answer_outer(body):
+    try:
+        outer = json.loads(body)
+    except (ValueError, TypeError):
+        raise LoginError("malformed_answer", "the answer is not JSON") from None
+    if not isinstance(outer, dict) or not isinstance(outer.get("nonce"), str) or not isinstance(outer.get("sealed"), str):
+        raise LoginError("malformed_answer", "the answer names no nonce or sealed part")
+    return outer
+
+
+def _aead(key, label):
+    if len(key) != KEY_BYTES:
+        raise LoginError("malformed_answer", "a key is %d bytes" % KEY_BYTES)
+    return ChaCha20Poly1305(HKDF(algorithm=SHA256(), length=KEY_BYTES, salt=None, info=label).derive(key))
+
+
+def _seal(key, label, plaintext):
+    nonce = os.urandom(AEAD_NONCE_BYTES)
+    return nonce + _aead(key, label).encrypt(nonce, plaintext, None)
+
+
+def _open(key, label, message):
+    try:
+        return _aead(key, label).decrypt(message[:AEAD_NONCE_BYTES], message[AEAD_NONCE_BYTES:], None)
+    except InvalidTag:
+        raise LoginError("malformed_answer", "the answer is sealed under another key") from None

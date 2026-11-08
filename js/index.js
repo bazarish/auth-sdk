@@ -1,4 +1,14 @@
-import { createHash, createHmac, createPublicKey, randomBytes, timingSafeEqual, verify } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  createPublicKey,
+  hkdfSync,
+  randomBytes,
+  timingSafeEqual,
+  verify,
+} from 'node:crypto';
 
 const CHALLENGE_VERSION = 1;
 export const WINDOW_SECONDS = 300;
@@ -30,6 +40,14 @@ const MILLISECONDS_PER_SECOND = 1000;
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 const BASE32_BITS = 5;
 const BYTE_BITS = 8;
+// SignInWithKey.md, "The key".
+const KEY_BYTES = 32;
+const KEY_FIELD = '&key=';
+const AEAD = 'chacha20-poly1305';
+const AEAD_NONCE_BYTES = 12;
+const AEAD_TAG_BYTES = 16;
+const CHALLENGE_LABEL = 'bazarish sign-in challenge v1';
+const ANSWER_LABEL = 'bazarish sign-in answer v1';
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 export class LoginError extends Error {
@@ -237,4 +255,86 @@ function fresh(ts, now) {
 
 function currentSeconds() {
   return Math.floor(Date.now() / MILLISECONDS_PER_SECOND);
+}
+
+export function newKey() {
+  return randomBytes(KEY_BYTES);
+}
+
+export function withKey(link, key) {
+  if (key.length !== KEY_BYTES) {
+    throw new RangeError(`a key is ${KEY_BYTES} bytes`);
+  }
+  return link + KEY_FIELD + Buffer.from(key).toString('base64url');
+}
+
+export function sealChallenge(key, challenge) {
+  return seal(key, CHALLENGE_LABEL, Buffer.from(challenge, 'utf8'));
+}
+
+export function answerNonce(body) {
+  return answerOuter(body).nonce;
+}
+
+export function openAnswer(key, body) {
+  const outer = answerOuter(body);
+  if (!BASE64.test(outer.sealed)) {
+    throw new LoginError('malformed_answer', 'the answer is not base64');
+  }
+  const opened = open(key, ANSWER_LABEL, Buffer.from(outer.sealed, 'base64'));
+  let inner;
+  try {
+    inner = JSON.parse(opened.toString('utf8'));
+  } catch {
+    throw new LoginError('malformed_answer', 'the answer does not read');
+  }
+  if (typeof inner?.challenge !== 'string' || typeof inner?.blob !== 'string') {
+    throw new LoginError('malformed_answer', 'the answer does not read');
+  }
+  if (decodeChallenge(inner.challenge)?.nonce !== outer.nonce) {
+    throw new LoginError('malformed_answer', 'the answer is for another challenge');
+  }
+  return { challenge: inner.challenge, blob: inner.blob };
+}
+
+function answerOuter(body) {
+  let outer;
+  try {
+    outer = JSON.parse(body);
+  } catch {
+    throw new LoginError('malformed_answer', 'the answer is not JSON');
+  }
+  if (typeof outer?.nonce !== 'string' || typeof outer?.sealed !== 'string') {
+    throw new LoginError('malformed_answer', 'the answer names no nonce or sealed part');
+  }
+  return outer;
+}
+
+function sealingKey(key, label) {
+  if (key.length !== KEY_BYTES) {
+    throw new LoginError('malformed_answer', `a key is ${KEY_BYTES} bytes`);
+  }
+  return Buffer.from(hkdfSync('sha256', key, Buffer.alloc(0), label, KEY_BYTES));
+}
+
+function seal(key, label, plaintext) {
+  const nonce = randomBytes(AEAD_NONCE_BYTES);
+  const cipher = createCipheriv(AEAD, sealingKey(key, label), nonce, { authTagLength: AEAD_TAG_BYTES });
+  return Buffer.concat([nonce, cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+}
+
+function open(key, label, message) {
+  if (message.length < AEAD_NONCE_BYTES + AEAD_TAG_BYTES) {
+    throw new LoginError('malformed_answer', 'the answer is too short');
+  }
+  const nonce = message.subarray(0, AEAD_NONCE_BYTES);
+  const tag = message.subarray(message.length - AEAD_TAG_BYTES);
+  const body = message.subarray(AEAD_NONCE_BYTES, message.length - AEAD_TAG_BYTES);
+  const decipher = createDecipheriv(AEAD, sealingKey(key, label), nonce, { authTagLength: AEAD_TAG_BYTES });
+  decipher.setAuthTag(tag);
+  try {
+    return Buffer.concat([decipher.update(body), decipher.final()]);
+  } catch {
+    throw new LoginError('malformed_answer', 'the answer is sealed under another key');
+  }
 }

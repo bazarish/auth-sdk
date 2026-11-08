@@ -1,7 +1,9 @@
 package bazarishauth
 
 import (
+	"crypto/cipher"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/mldsa"
 	"crypto/rand"
@@ -17,6 +19,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
@@ -62,6 +66,8 @@ var (
 	ErrWrongKeyType       = errors.New("bazarishauth: a key of the wrong type")
 	ErrBadSignature       = errors.New("bazarishauth: the signature does not verify")
 	ErrAlreadyUsed        = errors.New("bazarishauth: the challenge has already been used")
+	ErrMalformedAnswer    = errors.New("bazarishauth: this is not an answer sealed under this key")
+	ErrKeySize            = errors.New("bazarishauth: a key is 32 bytes")
 )
 
 type Consumer struct {
@@ -342,4 +348,112 @@ func decodeJSON(encoded string, target any) error {
 		return err
 	}
 	return json.Unmarshal(raw, target)
+}
+
+// SignInWithKey.md, "The key".
+const (
+	keyBytes       = 32
+	keyField       = "&key="
+	challengeLabel = "bazarish sign-in challenge v1"
+	answerLabel    = "bazarish sign-in answer v1"
+)
+
+// NewKey makes the key one challenge's exchanges over I2P are sealed under.
+func NewKey() ([]byte, error) {
+	key := make([]byte, keyBytes)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+// WithKey appends the key to a link that hands a challenge over I2P.
+func WithKey(link string, key []byte) (string, error) {
+	if len(key) != keyBytes {
+		return "", ErrKeySize
+	}
+	return link + keyField + base64.RawURLEncoding.EncodeToString(key), nil
+}
+
+// SealChallenge is the body of the answer to GET on an at= path.
+func SealChallenge(key []byte, challenge string) ([]byte, error) {
+	aead, err := sealing(key, challengeLabel)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return aead.Seal(nonce, nonce, []byte(challenge), nil), nil
+}
+
+type sealedAnswer struct {
+	Nonce  string `json:"nonce"`
+	Sealed string `json:"sealed"`
+}
+
+// AnswerNonce names the challenge a callback's body answers, so the site can find its key.
+func AnswerNonce(body []byte) (string, error) {
+	outer, err := answerOuter(body)
+	if err != nil {
+		return "", err
+	}
+	return outer.Nonce, nil
+}
+
+// OpenAnswer opens a callback's body; pass what it returns to Verify.
+func OpenAnswer(key, body []byte) (challenge, blob string, err error) {
+	outer, err := answerOuter(body)
+	if err != nil {
+		return "", "", err
+	}
+	sealed, err := base64.StdEncoding.DecodeString(outer.Sealed)
+	if err != nil {
+		return "", "", ErrMalformedAnswer
+	}
+	aead, err := sealing(key, answerLabel)
+	if err != nil {
+		return "", "", err
+	}
+	if len(sealed) < aead.NonceSize()+aead.Overhead() {
+		return "", "", ErrMalformedAnswer
+	}
+	opened, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], nil)
+	if err != nil {
+		return "", "", ErrMalformedAnswer
+	}
+	var inner struct {
+		Challenge *string `json:"challenge"`
+		Blob      *string `json:"blob"`
+	}
+	if json.Unmarshal(opened, &inner) != nil || inner.Challenge == nil || inner.Blob == nil {
+		return "", "", ErrMalformedAnswer
+	}
+	var envelope struct {
+		Nonce string `json:"nonce"`
+	}
+	if decodeChallenge(*inner.Challenge, &envelope) != nil || envelope.Nonce != outer.Nonce {
+		return "", "", ErrMalformedAnswer
+	}
+	return *inner.Challenge, *inner.Blob, nil
+}
+
+func answerOuter(body []byte) (sealedAnswer, error) {
+	var outer sealedAnswer
+	if json.Unmarshal(body, &outer) != nil || outer.Nonce == "" || outer.Sealed == "" {
+		return sealedAnswer{}, ErrMalformedAnswer
+	}
+	return outer, nil
+}
+
+func sealing(key []byte, label string) (cipher.AEAD, error) {
+	if len(key) != keyBytes {
+		return nil, ErrKeySize
+	}
+	derived, err := hkdf.Key(sha256.New, key, nil, label, chacha20poly1305.KeySize)
+	if err != nil {
+		return nil, err
+	}
+	return chacha20poly1305.New(derived)
 }

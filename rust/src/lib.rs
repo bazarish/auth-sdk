@@ -7,11 +7,15 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
+use openssl::md::Md;
 use openssl::memcmp;
+use openssl::pkey::Id;
 use openssl::pkey::{KeyType, PKey, Public};
+use openssl::pkey_ctx::PkeyCtx;
 use openssl::rand::rand_bytes;
 use openssl::sha::sha256;
 use openssl::sign::{Signer, Verifier as SignatureVerifier};
+use openssl::symm::{Cipher, decrypt_aead, encrypt_aead};
 use serde::{Deserialize, Serialize};
 
 const CHALLENGE_VERSION: i64 = 1;
@@ -43,6 +47,13 @@ const B33_LABEL_CHARS: usize = 56;
 const CALLBACK_MARKS: &str = "-._~!$&'()*+,;=:@/?%";
 const BASE32_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 const BASE32_BITS: u32 = 5;
+// SignInWithKey.md, "The key".
+const KEY_BYTES: usize = 32;
+const KEY_FIELD: &str = "&key=";
+const AEAD_NONCE_BYTES: usize = 12;
+const AEAD_TAG_BYTES: usize = 16;
+const CHALLENGE_LABEL: &str = "bazarish sign-in challenge v1";
+const ANSWER_LABEL: &str = "bazarish sign-in answer v1";
 const BYTE_BITS: u32 = 8;
 
 pub type StoreError = Box<dyn std::error::Error + Send + Sync>;
@@ -60,6 +71,8 @@ pub enum Error {
     WrongKeyType,
     BadSignature,
     AlreadyUsed,
+    MalformedAnswer,
+    KeySize,
     Crypto(ErrorStack),
     Store(StoreError),
 }
@@ -80,6 +93,8 @@ impl fmt::Display for Error {
             Error::WrongKeyType => f.write_str("a key of the wrong type"),
             Error::BadSignature => f.write_str("the signature does not verify"),
             Error::AlreadyUsed => f.write_str("the challenge has already been used"),
+            Error::MalformedAnswer => f.write_str("this is not an answer sealed under this key"),
+            Error::KeySize => f.write_str("a key is 32 bytes"),
             Error::Crypto(error) => error.fmt(f),
             Error::Store(error) => error.fmt(f),
         }
@@ -243,6 +258,114 @@ impl<S: NonceStore> Verifier<S> {
         signer.update(format!("{nonce}\n{ts}\n{}\n{callback}", self.canonical).as_bytes())?;
         Ok(hex(&signer.sign_to_vec()?))
     }
+}
+
+/// The key one challenge's exchanges over I2P are sealed under.
+pub fn new_key() -> Result<Vec<u8>, Error> {
+    let mut key = vec![0u8; KEY_BYTES];
+    rand_bytes(&mut key)?;
+    Ok(key)
+}
+
+/// Appends the key to a link that hands a challenge over I2P.
+pub fn with_key(link: &str, key: &[u8]) -> Result<String, Error> {
+    if key.len() != KEY_BYTES {
+        return Err(Error::KeySize);
+    }
+    Ok(format!("{link}{KEY_FIELD}{}", URL_SAFE_NO_PAD.encode(key)))
+}
+
+/// The body of the answer to GET on an at= path.
+pub fn seal_challenge(key: &[u8], challenge: &str) -> Result<Vec<u8>, Error> {
+    seal(key, CHALLENGE_LABEL, challenge.as_bytes())
+}
+
+#[derive(Deserialize)]
+struct SealedAnswer {
+    nonce: String,
+    sealed: String,
+}
+
+#[derive(Deserialize)]
+struct Answer {
+    challenge: String,
+    blob: String,
+}
+
+#[derive(Deserialize)]
+struct NonceOnly {
+    nonce: String,
+}
+
+/// Names the challenge a callback's body answers, so the site can find its key.
+pub fn answer_nonce(body: &[u8]) -> Result<String, Error> {
+    Ok(answer_outer(body)?.nonce)
+}
+
+/// Opens a callback's body into (challenge, blob); pass them to `verify`.
+pub fn open_answer(key: &[u8], body: &[u8]) -> Result<(String, String), Error> {
+    let outer = answer_outer(body)?;
+    let sealed = STANDARD
+        .decode(&outer.sealed)
+        .map_err(|_| Error::MalformedAnswer)?;
+    let opened = open(key, ANSWER_LABEL, &sealed)?;
+    let answer: Answer = serde_json::from_slice(&opened).map_err(|_| Error::MalformedAnswer)?;
+    match decode_challenge::<NonceOnly>(&answer.challenge) {
+        Some(envelope) if envelope.nonce == outer.nonce => Ok((answer.challenge, answer.blob)),
+        _ => Err(Error::MalformedAnswer),
+    }
+}
+
+fn answer_outer(body: &[u8]) -> Result<SealedAnswer, Error> {
+    serde_json::from_slice(body).map_err(|_| Error::MalformedAnswer)
+}
+
+fn sealing_key(key: &[u8], label: &str) -> Result<Vec<u8>, Error> {
+    if key.len() != KEY_BYTES {
+        return Err(Error::KeySize);
+    }
+    let mut context = PkeyCtx::new_id(Id::HKDF)?;
+    context.derive_init()?;
+    context.set_hkdf_md(Md::sha256())?;
+    context.set_hkdf_key(key)?;
+    context.add_hkdf_info(label.as_bytes())?;
+    let mut derived = vec![0u8; KEY_BYTES];
+    context.derive(Some(&mut derived))?;
+    Ok(derived)
+}
+
+fn seal(key: &[u8], label: &str, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut nonce = vec![0u8; AEAD_NONCE_BYTES];
+    rand_bytes(&mut nonce)?;
+    let mut tag = [0u8; AEAD_TAG_BYTES];
+    let body = encrypt_aead(
+        Cipher::chacha20_poly1305(),
+        &sealing_key(key, label)?,
+        Some(&nonce),
+        &[],
+        plaintext,
+        &mut tag,
+    )?;
+    nonce.extend_from_slice(&body);
+    nonce.extend_from_slice(&tag);
+    Ok(nonce)
+}
+
+fn open(key: &[u8], label: &str, message: &[u8]) -> Result<Vec<u8>, Error> {
+    if message.len() < AEAD_NONCE_BYTES + AEAD_TAG_BYTES {
+        return Err(Error::MalformedAnswer);
+    }
+    let (nonce, rest) = message.split_at(AEAD_NONCE_BYTES);
+    let (body, tag) = rest.split_at(rest.len() - AEAD_TAG_BYTES);
+    decrypt_aead(
+        Cipher::chacha20_poly1305(),
+        &sealing_key(key, label)?,
+        Some(nonce),
+        &[],
+        body,
+        tag,
+    )
+    .map_err(|_| Error::MalformedAnswer)
 }
 
 fn verify_blob(blob: &str, challenge: &str, now: i64) -> Result<String, Error> {

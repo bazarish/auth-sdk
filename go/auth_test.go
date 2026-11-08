@@ -20,6 +20,12 @@ type vector struct {
 	Blob        string   `json:"blob"`
 	Fingerprint string   `json:"fingerprint"`
 	Mldsa44Key  string   `json:"mldsa44PublicKey"`
+	Sealing     struct {
+		Key             string `json:"key"`
+		SealedChallenge string `json:"sealedChallenge"`
+		AnswerBody      string `json:"answerBody"`
+		KeyedLink       string `json:"keyedLink"`
+	} `json:"sealing"`
 }
 
 func load(t *testing.T) (vector, []byte) {
@@ -293,5 +299,89 @@ func TestConsumerCodePoints(t *testing.T) {
 		t.Run(strconv.QuoteToASCII(character), func(t *testing.T) {
 			verifier(t, secret, named(character))
 		})
+	}
+}
+
+func TestSealedAnswer(t *testing.T) {
+	v, secret := load(t)
+	key, err := base64.RawURLEncoding.DecodeString(v.Sealing.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(v.Sealing.AnswerBody)
+	nonce, err := AnswerNonce(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := decodeChallenge(v.Challenge, &envelope); err != nil || nonce != envelope.Nonce {
+		t.Fatalf("the answer names %q, the challenge %q", nonce, envelope.Nonce)
+	}
+	challenge, blob, err := OpenAnswer(key, body)
+	if err != nil || challenge != v.Challenge || blob != v.Blob {
+		t.Fatalf("the vector answer did not open: %v", err)
+	}
+	fingerprint, err := verifier(t, secret, v.Consumer).Verify(challenge, blob, time.Unix(v.Now, 0))
+	if err != nil || fingerprint != v.Fingerprint {
+		t.Fatalf("the opened answer did not verify: %v", err)
+	}
+
+	other, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outer map[string]string
+	if err := json.Unmarshal(body, &outer); err != nil {
+		t.Fatal(err)
+	}
+	outer["nonce"] = strings.Repeat("0", 32)
+	renamed, err := json.Marshal(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wrong := range [][2][]byte{{other, body}, {key, renamed}, {key, []byte("not json")}} {
+		if _, _, err := OpenAnswer(wrong[0], wrong[1]); !errors.Is(err, ErrMalformedAnswer) {
+			t.Fatalf("a wrong answer gave %v", err)
+		}
+	}
+	if _, err := AnswerNonce([]byte("{}")); !errors.Is(err, ErrMalformedAnswer) {
+		t.Fatalf("an answer without a nonce gave %v", err)
+	}
+}
+
+func TestSealedChallengeAndLink(t *testing.T) {
+	v, _ := load(t)
+	key, err := base64.RawURLEncoding.DecodeString(v.Sealing.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vectorSealed, err := base64.StdEncoding.DecodeString(v.Sealing.SealedChallenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := sealing(key, challengeLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := aead.Open(nil, vectorSealed[:aead.NonceSize()], vectorSealed[aead.NonceSize():], nil)
+	if err != nil || string(opened) != v.Challenge {
+		t.Fatalf("the vector challenge did not open: %v", err)
+	}
+	mine, err := SealChallenge(key, v.Challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := aead.Open(nil, mine[:aead.NonceSize()], mine[aead.NonceSize():], nil)
+	if err != nil || string(reopened) != v.Challenge {
+		t.Fatalf("a sealed challenge did not open: %v", err)
+	}
+	link, err := WithKey(v.Challenge, key)
+	if err != nil || link != v.Sealing.KeyedLink {
+		t.Fatalf("the keyed link is %q", link)
+	}
+	if _, err := WithKey(v.Challenge, key[:1]); !errors.Is(err, ErrKeySize) {
+		t.Fatalf("a short key gave %v", err)
 	}
 }

@@ -3,7 +3,21 @@ import json
 import pathlib
 import unittest
 
-from bazarish_auth import CHALLENGE_VERSION, NONCE_BYTES, SECRET_MIN_BYTES, WINDOW_SECONDS, Consumer, LoginError, Verifier
+import bazarish_auth
+from bazarish_auth import (
+    CHALLENGE_VERSION,
+    NONCE_BYTES,
+    SECRET_MIN_BYTES,
+    WINDOW_SECONDS,
+    Consumer,
+    LoginError,
+    Verifier,
+    answer_nonce,
+    new_key,
+    open_answer,
+    seal_challenge,
+    with_key,
+)
 
 VECTOR = json.loads((pathlib.Path(__file__).parents[2] / "testdata" / "vectors.json").read_text())
 SECRET = bytes.fromhex(VECTOR["secretHex"])
@@ -147,6 +161,44 @@ class VectorTest(unittest.TestCase):
         for character in allowed:
             with self.subTest(ascii(character)):
                 Verifier(SECRET, Consumer(f"panel{character}", CONSUMER.place, CONSUMER.role))
+
+
+class SealingTest(unittest.TestCase):
+    SEALING = VECTOR["sealing"]
+
+    def key(self):
+        encoded = self.SEALING["key"]
+        return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+
+    def test_vector_answer_opens_and_verifies(self):
+        body = self.SEALING["answerBody"]
+        self.assertEqual(answer_nonce(body), json.loads(unlinked(VECTOR["challenge"]))["nonce"])
+        challenge, blob = open_answer(self.key(), body)
+        self.assertEqual((challenge, blob), (VECTOR["challenge"], VECTOR["blob"]))
+        self.assertEqual(Verifier(SECRET, CONSUMER).verify(challenge, blob, NOW), VECTOR["fingerprint"])
+
+    def test_answer_refusals(self):
+        body = self.SEALING["answerBody"]
+        for wrong in (lambda: open_answer(new_key(), body),
+                      lambda: open_answer(self.key(), json.dumps(dict(json.loads(body), nonce="0" * 32))),
+                      lambda: open_answer(self.key(), "not json"),
+                      lambda: answer_nonce("{}")):
+            with self.assertRaises(LoginError) as raised:
+                wrong()
+            self.assertEqual(raised.exception.kind, "malformed_answer")
+
+    def test_vector_challenge_opens(self):
+        sealed = base64.b64decode(self.SEALING["sealedChallenge"])
+        opened = bazarish_auth._open(self.key(), bazarish_auth.CHALLENGE_LABEL, sealed)
+        self.assertEqual(opened.decode(), VECTOR["challenge"])
+        mine = seal_challenge(self.key(), VECTOR["challenge"])
+        self.assertNotEqual(mine, sealed)
+        self.assertEqual(bazarish_auth._open(self.key(), bazarish_auth.CHALLENGE_LABEL, mine).decode(), VECTOR["challenge"])
+
+    def test_keyed_link(self):
+        self.assertEqual(with_key(VECTOR["challenge"], self.key()), self.SEALING["keyedLink"])
+        with self.assertRaises(ValueError):
+            with_key(VECTOR["challenge"], b"short")
 
 
 if __name__ == "__main__":
