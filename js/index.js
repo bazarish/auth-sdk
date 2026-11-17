@@ -18,7 +18,7 @@ const NAME_MAX = 96;
 const PLACE_MAX = 256;
 const ROLE_MAX = 48;
 const PLACES_MAX = 4;
-const SIGNED_VERSION = 'v2';
+const SIGNED_VERSION = 'v1';
 const LOGIN_METHOD = 'BZ-LOGIN';
 const LOGIN_PATH = '/portal/login';
 const CHALLENGE_PREFIX = 'bazarish://sign?c=';

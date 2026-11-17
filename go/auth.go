@@ -32,7 +32,7 @@ const (
 	placeMax         = 256
 	roleMax          = 48
 	placesMax        = 4
-	signedVersion    = "v2"
+	signedVersion    = "v1"
 	loginMethod      = "BZ-LOGIN"
 	loginPath        = "/portal/login"
 	challengePrefix  = "bazarish://sign?c="

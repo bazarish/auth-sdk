@@ -46,7 +46,7 @@ FORBIDDEN_CODE_POINTS = (
     (0x2028, 0x202E),
     (0x2066, 0x2069),
 )
-SIGNED_VERSION = "v2"
+SIGNED_VERSION = "v1"
 LOGIN_METHOD = "BZ-LOGIN"
 LOGIN_PATH = "/portal/login"
 CHALLENGE_PREFIX = "bazarish://sign?c="

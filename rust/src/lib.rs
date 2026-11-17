@@ -35,7 +35,7 @@ const FORBIDDEN_CODE_POINTS: &[RangeInclusive<char>] = &[
     '\u{2028}'..='\u{202e}',
     '\u{2066}'..='\u{2069}',
 ];
-const SIGNED_VERSION: &str = "v2";
+const SIGNED_VERSION: &str = "v1";
 const LOGIN_METHOD: &str = "BZ-LOGIN";
 const LOGIN_PATH: &str = "/portal/login";
 const CHALLENGE_PREFIX: &str = "bazarish://sign?c=";
